@@ -1,0 +1,86 @@
+import pandas as pd
+import pyodbc
+
+# =========================================================
+# STEP 1: Read input Excel file
+# =========================================================
+input_file = r"./shared/input/input_trades_to_validate.xlsx"
+sheet_name = "Sheet1"
+
+df = pd.read_excel(input_file, sheet_name=sheet_name)
+
+# =========================================================
+# STEP 2: Prepare result container
+# =========================================================
+validation_results = []
+
+# =========================================================
+# STEP 3: Loop through each record in input file
+# =========================================================
+for index, row in df.iterrows():
+    db_instance = str(row["DatabaseInstanceName"]).strip()
+    db_name = str(row["DatabaseName"]).strip()
+    table_name = str(row["TableName"]).strip()
+    column_name = str(row["ColumnName"]).strip()
+    trade_ids_str = str(row["TradeIDs"]).strip()
+
+    if not all([db_instance, db_name, table_name, column_name, trade_ids_str]):
+        print(f"⚠️ Skipping incomplete row at index {index}")
+        continue
+
+    # Split trade IDs by comma
+    trade_ids = [t.strip() for t in trade_ids_str.split(",") if t.strip()]
+
+    # =========================================================
+    # STEP 4: Connect to SQL Server instance
+    # =========================================================
+    try:
+        conn_str = (
+            f"Driver={{SQL Server}};"
+            f"Server={db_instance};"
+            f"Database={db_name};"
+            f"Trusted_Connection=yes;"
+        )
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+    except Exception as e:
+        print(f"❌ Connection failed for {db_instance}/{db_name}: {e}")
+        continue
+
+    # =========================================================
+    # STEP 5: Validate each trade
+    # =========================================================
+    for trade_id in trade_ids:
+        # Build dynamic SQL
+        query = f"""
+        SELECT CASE 
+            WHEN EXISTS (
+                SELECT 1 
+                FROM {table_name} 
+                WHERE {column_name} = '{trade_id}'
+            ) THEN 'FOUND' ELSE 'MISSING' END AS STATUS
+        """
+        try:
+            cursor.execute(query)
+            result = cursor.fetchone()
+            status = result[0] if result else "UNKNOWN"
+        except Exception as e:
+            status = f"ERROR: {e}"
+
+        validation_results.append({
+            "DatabaseInstanceName": db_instance,
+            "DatabaseName": db_name,
+            "TableName": table_name,
+            "ColumnName": column_name,
+            "TradeID": trade_id,
+            "Status": status
+        })
+
+    conn.close()
+
+# =========================================================
+# STEP 6: Export consolidated results
+# =========================================================
+output_path = r"./shared/reports/trade_validation_report.xlsx"
+pd.DataFrame(validation_results).to_excel(output_path, index=False)
+print(f"\n✅ Validation completed. Results saved to: {output_path}")
