@@ -24,7 +24,8 @@ validation_results = []
 # STEP 3: Loop Through Each Row
 
 for index, row in df.iterrows():
-    # MongoDB connection details
+    
+
     mongo_host = str(row["MongoHost"]).strip()  # e.g., localhost or cluster.mongodb.net
     mongo_port = str(row["MongoPort"]).strip() if pd.notna(row.get("MongoPort")) else "27017"
     database_name = str(row["DatabaseName"]).strip()
@@ -68,7 +69,7 @@ for index, row in df.iterrows():
     client = None
     try:
         # Connect to MongoDB
-        print(f"🔌 Connecting to MongoDB...")
+        print(f"Connecting to MongoDB...")
         client = MongoClient(
             connection_string,
             serverSelectionTimeoutMS=10000,  # 10 second timeout
@@ -97,6 +98,7 @@ for index, row in df.iterrows():
                 "Status": f"CONNECTION ERROR: {e}"
             })
         continue
+
     except Exception as e:
         print(f"Unexpected error: {e}")
         for tid in trade_ids:
@@ -109,6 +111,7 @@ for index, row in df.iterrows():
                 "TradeID": tid,
                 "Status": f"ERROR: {e}"
             })
+
         continue
 
     
@@ -138,6 +141,7 @@ for index, row in df.iterrows():
         except OperationFailure as e:
             status = f"QUERY ERROR: {e}"
             print(f"TradeID {trade_id}: {status}")
+        
         except Exception as e:
             status = f"ERROR: {e}"
             print(f"TradeID {trade_id}: {status}")
