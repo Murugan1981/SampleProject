@@ -1,0 +1,111 @@
+import pandas as pd
+import os
+import requests
+import xml.etree.ElementTree as ET
+import pyodbc
+from auth import get_credentials
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# STEP 1: Setup auth for DB and CDW
+USERNAME, PASSWORD = get_credentials()
+
+def fetch_bookref_from_cdw(cdw_url):
+    try:
+        from subprocess import run, PIPE
+        result = run(['curl', '-u', f'{USERNAME}:{PASSWORD}', cdw_url], stdout=PIPE, stderr=PIPE, text=True, timeout=60)
+        if result.returncode == 0:
+            xmldata = result.stdout.strip()
+            root = ET.fromstring(xmldata)
+            ns = {'ns': root.tag.split('}')[0].strip('{')}
+            account_nodes = root.findall(".//ns:accountId", namespaces=ns)
+            if account_nodes:
+                return account_nodes[-1].text  # Take the LAST occurrence
+        return None
+    except Exception as e:
+        return None
+
+def check_bookref_in_db(server, database, table, column, bookref):
+    try:
+        conn = pyodbc.connect(f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};UID={USERNAME};PWD={PASSWORD}")
+        cursor = conn.cursor()
+        query = f"SELECT 1 FROM {table} WHERE {column} = ?"
+        cursor.execute(query, bookref)
+        result = cursor.fetchone()
+        conn.close()
+        return "FOUND" if result else "NOT FOUND"
+    except Exception:
+        return "ERROR"
+
+def read_trade_file(filepath):
+    try:
+        df = pd.read_csv(filepath, delimiter='|')
+    except:
+        df = pd.read_csv(filepath, delimiter=';')
+    return df
+
+# STEP 2: Main logic
+def validate_mbe_position_set(input_file):
+    df_input = pd.read_excel(input_file, sheet_name="ValidationInput")
+    output_rows = []
+
+    for _, row in df_input.iterrows():
+        file_type = row['FileType']
+        filename = row['Filename']
+        folder = row['DestinationFolder']
+        trades = [x.strip() for x in str(row['Trades']).split(',')]
+        cdw_template = row['CDWURL']
+        batch_date = row['BatchDate']
+        db_server = row['DatabaseInstanceName']
+        db_name = row['DatabaseName']
+        table = row['TableName']
+        column = row['ColumnNameForBookRef']
+
+        full_path = os.path.join(folder, filename)
+        if not os.path.exists(full_path):
+            print(f"⚠️ File not found: {full_path}")
+            continue
+
+        df_data = read_trade_file(full_path)
+
+        for trade in trades:
+            trade_found = "MISSING"
+            bookref_file = ""
+            bookref_cdw = ""
+            bookref_status = "NOT CHECKED"
+
+            try:
+                matched = df_data[df_data["M_ORIGIN_RE"].astype(str).str.strip() == trade.strip()]
+                if not matched.empty:
+                    trade_found = "FOUND"
+                    bookref_file = matched["BOOK_ID"].iloc[0]
+
+                # CDW URL formation
+                cdw_url = cdw_template.replace("{trade}", trade).replace("{BatchDate}", str(batch_date))
+                bookref_cdw = fetch_bookref_from_cdw(cdw_url)
+
+                if bookref_cdw:
+                    bookref_status = check_bookref_in_db(db_server, db_name, table, column, bookref_cdw)
+                else:
+                    bookref_status = "CDW BOOKREF NOT FOUND"
+
+            except Exception as e:
+                bookref_status = f"ERROR: {str(e)}"
+
+            output_rows.append({
+                "FileType": file_type,
+                "Filename": filename,
+                "TradeID": trade,
+                "TradeFound": trade_found,
+                "CDWURL": cdw_url,
+                "BOOKREF_IN_FILE": bookref_file,
+                "BOOKREF_IN_CDW": bookref_cdw,
+                "BOOKREF_FOUND_IN_DB": bookref_status
+            })
+
+    pd.DataFrame(output_rows).to_excel("./shared/reports/trades_position_validation_report.xlsx", index=False)
+    print("✅ Report saved to: trades_position_validation_report.xlsx")
+
+if __name__ == "__main__":
+    validate_mbe_position_set("./shared/input/MBE_POSITION_Validation.xlsx")
