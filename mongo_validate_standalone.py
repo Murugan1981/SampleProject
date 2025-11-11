@@ -87,28 +87,28 @@ for index, row in df.iterrows():
 
     except ConnectionFailure as e:
         print(f"Connection failed: {e}")
-        for tid in trade_ids:
+        for trade_id in trade_ids:
             validation_results.append({
                 "MongoHost": mongo_host,
                 "MongoPort": mongo_port,
                 "DatabaseName": database_name,
                 "CollectionName": collection_name,
                 "FieldName": field_name,
-                "TradeID": tid,
+                "TradeID": trade_id,
                 "Status": f"CONNECTION ERROR: {e}"
             })
         continue
 
     except Exception as e:
         print(f"Unexpected error: {e}")
-        for tid in trade_ids:
+        for trade_id in trade_ids:
             validation_results.append({
                 "MongoHost": mongo_host,
                 "MongoPort": mongo_port,
                 "DatabaseName": database_name,
                 "CollectionName": collection_name,
                 "FieldName": field_name,
-                "TradeID": tid,
+                "TradeID": trade_id,
                 "Status": f"ERROR: {e}"
             })
 
