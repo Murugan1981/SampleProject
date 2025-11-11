@@ -7,75 +7,111 @@ input_file = r"./shared/input/mongo_validation_input.xlsx"
 sheet_name = "MongoValidationInput"
 df = pd.read_excel(input_file, sheet_name=sheet_name)
 
-# STEP 2: Prepare empty results list
 validation_results = []
 
-# STEP 3: Loop through each row in Excel
+# STEP 2: Loop through each row of Excel
 for index, row in df.iterrows():
-    mongo_host = row["mongoHost"]
-    mongo_port = row["MongoPort"]
-    db_name = row["DatabaseName"]
-    collection_name = row["CollectionName"]
-    field_name = row["FieldName"]
-    trade_ids_raw = str(row["TradeIDs"]).strip()
-    
-    if not trade_ids_raw or trade_ids_raw.lower() == "nan":
-        print(f"⚠️ No TradeIDs found for row {index+1}, skipping.")
+    mongo_host = row.get("mongoHost")
+    mongo_port = row.get("MongoPort")
+    db_name = row.get("DatabaseName")
+    collection_name = row.get("CollectionName")
+
+    print(f"\n🔍 Processing row {index+1}: {db_name}.{collection_name} on {mongo_host}:{mongo_port}")
+
+    # STEP 3: Build dynamic query dictionary
+    query_conditions = []
+    col_names = df.columns.tolist()
+
+    for i in range(1, 50):  # Support up to 50 dynamic conditions
+        field_col = f"Field{i}"
+        op_col = f"Operator{i}"
+        val_col = f"Value{i}"
+
+        if field_col in col_names and op_col in col_names and val_col in col_names:
+            field = str(row.get(field_col)).strip()
+            op = str(row.get(op_col)).strip().lower()
+            val_raw = str(row.get(val_col)).strip()
+
+            if not field or field.lower() == "nan":
+                continue
+
+            # Parse value(s)
+            if op in ["in", "nin"]:
+                values = [v.strip() for v in val_raw.split(",") if v.strip()]
+            else:
+                values = val_raw
+
+            # Build Mongo operator condition
+            if op == "eq":
+                condition = {field: values}
+            elif op == "ne":
+                condition = {field: {"$ne": values}}
+            elif op == "in":
+                condition = {field: {"$in": values}}
+            elif op == "nin":
+                condition = {field: {"$nin": values}}
+            elif op == "gt":
+                condition = {field: {"$gt": values}}
+            elif op == "gte":
+                condition = {field: {"$gte": values}}
+            elif op == "lt":
+                condition = {field: {"$lt": values}}
+            elif op == "lte":
+                condition = {field: {"$lte": values}}
+            else:
+                print(f"⚠️ Unsupported operator '{op}' for field '{field}' — skipping.")
+                continue
+
+            query_conditions.append(condition)
+
+    if not query_conditions:
+        print(f"⚠️ No valid query conditions found in row {index+1}, skipping.")
         continue
-    
-    # Split TradeIDs by comma and strip spaces
-    trade_ids = [tid.strip() for tid in trade_ids_raw.split(",") if tid.strip()]
-    
-    print(f"\n🔍 Validating {len(trade_ids)} trades in {db_name}.{collection_name} on {mongo_host}:{mongo_port}")
-    
+
+    mongo_query = {"$and": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
+    print(f"📋 Query built: {mongo_query}")
+
     try:
         # STEP 4: Connect to MongoDB
-        # Use dummy credentials for now — replace with actual if needed
         mongo_uri = f"mongodb://user123:Pass123@{mongo_host}:{mongo_port}/"
         client = MongoClient(mongo_uri)
         db = client[db_name]
         collection = db[collection_name]
-        
-        # STEP 5: Query all TradeIDs at once using $in
-        query = {field_name: {"$in": trade_ids}}
-        found_docs = collection.find(query, {field_name: 1, "_id": 0})
-        
-        # Convert found TradeIDs to a set for fast lookup
-        found_ids = {doc[field_name] for doc in found_docs if field_name in doc}
-        
-        # STEP 6: Populate results row-wise
-        for tid in trade_ids:
-            validation_results.append({
-                "mongoHost": mongo_host,
-                "MongoPort": mongo_port,
-                "DatabaseName": db_name,
-                "CollectionName": collection_name,
-                "FieldName": field_name,
-                "TradeID": tid,
-                "Status": "Found" if tid in found_ids else "Missing"
-            })
-        
-        print(f"✅ Completed validation for {db_name}.{collection_name}")
+
+        # STEP 5: Execute query (single hit)
+        results = list(collection.find(mongo_query, {"_id": 0}))
+        found_count = len(results)
+
+        # STEP 6: Add row to output
+        validation_results.append({
+            "mongoHost": mongo_host,
+            "MongoPort": mongo_port,
+            "DatabaseName": db_name,
+            "CollectionName": collection_name,
+            "Query": str(mongo_query),
+            "DocumentsFound": found_count,
+            "Status": "Found" if found_count > 0 else "Missing"
+        })
+
+        print(f"✅ Found {found_count} document(s).")
 
     except Exception as e:
-        print(f"❌ Error validating row {index+1}: {e}")
-        # Log all trades from this row as error
-        for tid in trade_ids:
-            validation_results.append({
-                "mongoHost": mongo_host,
-                "MongoPort": mongo_port,
-                "DatabaseName": db_name,
-                "CollectionName": collection_name,
-                "FieldName": field_name,
-                "TradeID": tid,
-                "Status": f"Error: {e}"
-            })
+        print(f"❌ Error processing row {index+1}: {e}")
+        validation_results.append({
+            "mongoHost": mongo_host,
+            "MongoPort": mongo_port,
+            "DatabaseName": db_name,
+            "CollectionName": collection_name,
+            "Query": str(mongo_query),
+            "DocumentsFound": "N/A",
+            "Status": f"Error: {e}"
+        })
         continue
 
-# STEP 7: Export results to Excel
-output_file = r"./shared/reports/mongo_trade_validation_report.xlsx"
+# STEP 7: Export report
+output_file = r"./shared/reports/mongo_dynamic_validation_report.xlsx"
 df_results = pd.DataFrame(validation_results)
 df_results["RunTimestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 df_results.to_excel(output_file, index=False)
-print(f"\n📊 Validation report generated successfully: {output_file}")
+print(f"\n📊 Report generated successfully → {output_file}")
