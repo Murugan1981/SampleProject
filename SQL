@@ -1,0 +1,42 @@
+# =========================================================
+# STEP 5 (OPTIMIZED): Validate All Trade IDs in One Query
+# =========================================================
+# Prepare IN clause
+quoted_ids = "', '".join(trade_ids)
+in_clause = f"('{quoted_ids}')"
+
+# Build SQL once
+query = f"""
+SELECT DISTINCT {column_name}
+FROM {table_name}
+WHERE {column_name} IN {in_clause};
+"""
+
+try:
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    found_ids = {str(row[0]).strip() for row in rows}
+except Exception as e:
+    print(f"❌ Query failed: {e}")
+    for tid in trade_ids:
+        validation_results.append({
+            "DatabaseServerName": server_name,
+            "DatabaseName": database_name,
+            "TableName": table_name,
+            "ColumnName": column_name,
+            "TradeID": tid,
+            "Status": f"ERROR: {e}"
+        })
+    continue
+
+# Compare inside Python
+for tid in trade_ids:
+    status = "FOUND" if tid in found_ids else "MISSING"
+    validation_results.append({
+        "DatabaseServerName": server_name,
+        "DatabaseName": database_name,
+        "TableName": table_name,
+        "ColumnName": column_name,
+        "TradeID": tid,
+        "Status": status
+    })
