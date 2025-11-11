@@ -40,3 +40,146 @@ for tid in trade_ids:
         "TradeID": tid,
         "Status": status
     })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# New file
+
+
+import pandas as pd
+import pyodbc
+from auth import DB_USERNAME, DB_PASSWORD
+
+# =========================================================
+# STEP 1: Read Input Excel
+# =========================================================
+input_path = r"./shared/input/input_trades_to_validate.xlsx"
+sheet_name = "Sheet1"
+
+df = pd.read_excel(input_path, sheet_name=sheet_name)
+
+# =========================================================
+# STEP 2: Prepare Output Container
+# =========================================================
+validation_results = []
+
+# =========================================================
+# STEP 3: Loop Through Each Row
+# =========================================================
+for index, row in df.iterrows():
+    server = str(row.get("DatabaseServerName", "")).strip()
+    database = str(row.get("DatabaseName", "")).strip()
+    table = str(row.get("TableName", "")).strip()
+    column = str(row.get("ColumnName", "")).strip()
+    trades_raw = str(row.get("Trades", "")).strip()
+
+    if not all([server, database, table, column, trades_raw]):
+        print(f"⚠️ Skipping row {index}: Incomplete details.")
+        continue
+
+    trade_ids = [t.strip() for t in trades_raw.split(",") if t.strip()]
+    if not trade_ids:
+        continue
+
+    print(f"\n🔍 Connecting to {server}/{database} | Table: {table} | Checking {len(trade_ids)} trades")
+
+    # =========================================================
+    # STEP 4: Establish SQL Connection (SQL Auth)
+    # =========================================================
+    conn_str = (
+        f"DRIVER={{SQL Server}};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        f"UID={DB_USERNAME};"
+        f"PWD={DB_PASSWORD};"
+    )
+
+    try:
+        conn = pyodbc.connect(conn_str, timeout=10)
+        cursor = conn.cursor()
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+        for trade_id in trade_ids:
+            validation_results.append({
+                "DatabaseServerName": server,
+                "DatabaseName": database,
+                "TableName": table,
+                "ColumnName": column,
+                "TradeID": trade_id,
+                "Status": f"CONNECTION ERROR"
+            })
+        continue
+
+    # =========================================================
+    # STEP 5: Optimized Batch Query
+    # =========================================================
+    quoted_ids = "', '".join(trade_ids)
+    in_clause = f"('{quoted_ids}')"
+    query = f"""
+    SELECT DISTINCT {column}
+    FROM {table}
+    WHERE {column} IN {in_clause};
+    """
+
+    try:
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        found_ids = {str(row[0]).strip() for row in rows}
+    except Exception as e:
+        print(f"❌ Query failed: {e}")
+        for trade_id in trade_ids:
+            validation_results.append({
+                "DatabaseServerName": server,
+                "DatabaseName": database,
+                "TableName": table,
+                "ColumnName": column,
+                "TradeID": trade_id,
+                "Status": f"QUERY ERROR"
+            })
+        conn.close()
+        continue
+
+    # =========================================================
+    # STEP 6: Mark FOUND / MISSING
+    # =========================================================
+    for trade_id in trade_ids:
+        status = "FOUND" if trade_id in found_ids else "MISSING"
+        validation_results.append({
+            "DatabaseServerName": server,
+            "DatabaseName": database,
+            "TableName": table,
+            "ColumnName": column,
+            "TradeID": trade_id,
+            "Status": status
+        })
+
+    conn.close()
+
+# =========================================================
+# STEP 7: Save Final Report
+# =========================================================
+output_path = r"./shared/reports/trade_validation_report.xlsx"
+pd.DataFrame(validation_results).to_excel(output_path, index=False)
+print(f"\n✅ Trade validation complete. Results saved to: {output_path}")
