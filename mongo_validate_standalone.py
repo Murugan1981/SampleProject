@@ -25,6 +25,17 @@ df = pd.read_excel(input_file, sheet_name=sheet_name)
 # Convert all column names to string and strip whitespace
 df.columns = df.columns.astype(str).str.strip()
 
+print(f"\n📋 Excel Columns Found: {list(df.columns)}")
+print(f"📊 Total Rows: {len(df)}\n")
+
+# Create case-insensitive column mapper
+col_map = {}
+for col in df.columns:
+    col_lower = col.lower().replace('_', '').replace(' ', '')
+    col_map[col_lower] = col
+
+print(f"🔍 Column Mapping: {col_map}\n")
+
 validation_results = []
 
 def smart_cast(value_str):
@@ -60,7 +71,14 @@ def smart_cast(value_str):
 
 def get_excel_value(row, column_name):
     """Safely get value from Excel, handling NaN and converting to proper type"""
-    val = row.get(column_name)
+    # Try to find column case-insensitively
+    search_key = column_name.lower().replace('_', '').replace(' ', '')
+    actual_col = col_map.get(search_key)
+    
+    if actual_col is None:
+        return None
+    
+    val = row.get(actual_col)
     if pd.isna(val):
         return None
     return str(val).strip()
