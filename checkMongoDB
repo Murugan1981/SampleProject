@@ -1,0 +1,41 @@
+from pymongo import MongoClient
+from datetime import datetime, timezone
+from dateutil import parser
+
+import urllib.parse
+
+# ✅ Set your Atlas or on-prem MongoDB connection details
+mongo_host = "ubd1-5-pl-0.71fxk.mongodb.net"
+username = "your_username"
+password = "your_password"
+
+# ✅ Encode safely
+encoded_user = urllib.parse.quote_plus(username)
+encoded_pass = urllib.parse.quote_plus(password)
+
+# ✅ Form Mongo URI (Atlas)
+mongo_uri = f"mongodb+srv://{encoded_user}:{encoded_pass}@{mongo_host}/?retryWrites=true&w=majority"
+
+# ✅ Connect
+client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
+client.admin.command("ping")
+print("✅ Connection established")
+
+# ✅ Select DB and Collection (IMPORTANT)
+db = client["Pegasus"]  # 🟡 replace with correct DB name (not 'Pagasus' unless that's exact)
+collection = db["MarketRiskExposureMessage"]  # 🟡 your actual collection name
+
+# ✅ Hardcoded test query (match exactly what Studio 3T shows)
+mongo_query = {
+    "LegalEntity": "MBE",
+    "KeyValue": {"$in": ["58707416"]},
+    # Optional:
+    # "ReportingDate": parser.isoparse("2025-07-02T00:00:00.000+0000")
+}
+
+# ✅ Execute and print
+results = list(collection.find(mongo_query, {"_id": 0}))
+print(f"✅ Found {len(results)} document(s).")
+
+for doc in results:
+    print(doc)
