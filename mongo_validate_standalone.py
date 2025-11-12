@@ -38,10 +38,10 @@ print(f"🔍 Column Mapping: {col_map}\n")
 
 validation_results = []
 
-def smart_cast(value_str):
+def smart_cast(value_str, field_name=""):
     """
     Intelligently cast a string value to the appropriate type.
-    Returns the value in priority order: int -> float -> datetime -> string
+    Returns the value in priority order: datetime -> int -> float -> string (KEEP AS STRING BY DEFAULT)
     """
     value_str = str(value_str).strip()
     
@@ -49,24 +49,28 @@ def smart_cast(value_str):
     if not value_str or value_str.lower() in ['nan', 'none', 'null', '']:
         return None
     
-    # Try integer
-    if value_str.isdigit() or (value_str.startswith('-') and value_str[1:].isdigit()):
-        return int(value_str)
-    
-    # Try float
-    try:
-        return float(value_str)
-    except ValueError:
-        pass
-    
-    # Try ISO datetime
-    if 'T' in value_str or '-' in value_str:
+    # PRIORITY 1: Try ISO datetime (for ReportingDate fields)
+    if 'T' in value_str or (value_str.count('-') >= 2 and len(value_str) >= 10):
         try:
             return parser.isoparse(value_str)
         except (ValueError, parser.ParserError):
             pass
     
-    # Return as string
+    # PRIORITY 2: If field suggests it should be numeric, try casting
+    # Otherwise KEEP AS STRING (MongoDB stores KeyValue as string!)
+    field_lower = field_name.lower()
+    if any(keyword in field_lower for keyword in ['amount', 'count', 'number', 'qty', 'quantity', 'age', 'id']):
+        # Try integer
+        if value_str.isdigit() or (value_str.startswith('-') and value_str[1:].isdigit()):
+            return int(value_str)
+        
+        # Try float
+        try:
+            return float(value_str)
+        except ValueError:
+            pass
+    
+    # PRIORITY 3: Return as string (DEFAULT - safest option)
     return value_str
 
 def get_excel_value(row, column_name):
@@ -141,7 +145,7 @@ for index, row in df.iterrows():
             if op in ["in", "nin"]:
                 values = []
                 for v in val_raw.split(","):
-                    casted = smart_cast(v)
+                    casted = smart_cast(v, field)  # Pass field name for context
                     if casted is not None:
                         values.append(casted)
                 
@@ -149,7 +153,7 @@ for index, row in df.iterrows():
                     print(f"⚠️ No valid values for {field} with operator {op}")
                     continue
             else:
-                values = smart_cast(val_raw)
+                values = smart_cast(val_raw, field)  # Pass field name for context
                 if values is None:
                     print(f"⚠️ Skipping {field} - could not parse value: {val_raw}")
                     continue
