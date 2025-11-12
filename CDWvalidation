@@ -1,0 +1,137 @@
+import pandas as pd
+import os
+import xml.etree.ElementTree as ET
+import sqlite3
+import subprocess
+from dotenv import load_dotenv
+
+# === Load CDW Credentials from .env ===
+load_dotenv()
+CDW_USERNAME = os.getenv("CDW_USERNAME")
+CDW_PASSWORD = os.getenv("CDW_PASSWORD")
+
+# === Define input/output files ===
+input_file = "shared/input/input_filenames.xlsx"
+sheet_name = "TradesInFile"
+output_file = "shared/reports/trades_validation_report.xlsx"
+
+# === Helper: Fetch CDW Response via curl ===
+def fetch_cdw_response(cdw_url, username, password):
+    try:
+        result = subprocess.run(
+            ['curl', '-u', f'{username}:{password}', cdw_url],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30
+        )
+        return result.stdout if result.returncode == 0 else None
+    except Exception:
+        return None
+
+# === Helper: Extract last HOUSE-ACCOUNT book-ref and book-type ===
+def extract_book_ref_from_xml(xml_data):
+    try:
+        root = ET.fromstring(xml_data)
+        ns = {'fpml': 'http://www.fpml.org/FpML-5/reporting'}
+        account_nodes = root.findall(".//fpml:account[@id='HOUSE-ACCOUNT']", namespaces=ns)
+        if account_nodes:
+            last_account = account_nodes[-1]
+            book_ref = last_account.find(".//fpml:accountId[@accountIdScheme='mhi:book-ref']", namespaces=ns)
+            book_type = last_account.find(".//fpml:accountId[@accountIdScheme='mhi:book-type']", namespaces=ns)
+            if book_ref is not None and book_type is not None:
+                return f"{book_ref.text.strip()} {book_type.text.strip()}"
+            return "Missing book-ref or book-type"
+        return "HOUSE-ACCOUNT not found"
+    except Exception as e:
+        return f"XML Parse Error: {str(e)}"
+
+# === Helper: Validate BookRef in DB ===
+def check_bookref_in_db(bookref, db_instance, db_name, table, column):
+    try:
+        conn = sqlite3.connect(f"{db_instance}_{db_name}.db")
+        cursor = conn.cursor()
+        query = f"SELECT 1 FROM {table} WHERE {column} = ?"
+        cursor.execute(query, (bookref,))
+        result = cursor.fetchone()
+        conn.close()
+        return ("FOUND" if result else "MISSING", query)
+    except Exception as e:
+        return ("DBError", f"Exception: {str(e)}")
+
+# === Core Logic per Row ===
+def validate_trades(row):
+    filename = row["Filename"]
+    filetype = row["FileType"]
+    trades = str(row["Trades"]).split(",")
+    cdw_base_url = row["CDWURL"]
+    batch_date = row["BatchDate"]
+    db_instance = row["DatabaseInstanceName"]
+    db_name = row["Databasename"]
+    table = row["Tablename"]
+    column = row["ColumnNameForBookRef"]
+
+    report = []
+    try:
+        file_path = os.path.join("shared/input", filename)
+        df_file = pd.read_csv(file_path, sep='|', engine='python')
+    except Exception as e:
+        for trade in trades:
+            report.append({
+                "FileType": filetype,
+                "Filename": filename,
+                "TradeID": trade,
+                "TradeFoundInFILE": "MISSING",
+                "CDWURL": f"{cdw_base_url}/{trade}?on={batch_date} -- Exception during validation",
+                "BOOKREF_INCDW": "",
+                "DBQueryUsed": "",
+                "BookRefFoundInDB": "",
+                "DBQueryException": "",
+                "Comments": f"Exception occurred: {str(e)}"
+            })
+        return report
+
+    for trade in trades:
+        trade_found = "FOUND" if trade in df_file['M_ORIGIN_RE'].astype(str).values else "MISSING"
+        cdw_url = f"{cdw_base_url}/{trade}?on={batch_date}"
+        bookref = ""
+        db_status = ""
+        query_used = ""
+        db_error = ""
+
+        xml_data = fetch_cdw_response(cdw_url, CDW_USERNAME, CDW_PASSWORD)
+        if xml_data:
+            bookref = extract_book_ref_from_xml(xml_data)
+            if " " in bookref:  # valid format
+                db_status, query_used = check_bookref_in_db(bookref, db_instance, db_name, table, column)
+                db_error = "" if db_status != "DBError" else query_used
+            else:
+                db_status = "MISSING"
+                query_used = f"SELECT * FROM {table} WHERE {column} = '{bookref}'"
+        else:
+            bookref = "CDW Fetch Error"
+            db_status = "MISSING"
+            query_used = f"-- CDW URL: {cdw_url} -- CDW Fetch Failed"
+
+        report.append({
+            "FileType": filetype,
+            "Filename": filename,
+            "TradeID": trade,
+            "TradeFoundInFILE": trade_found,
+            "CDWURL": cdw_url,
+            "BOOKREF_INCDW": bookref,
+            "DBQueryUsed": query_used,
+            "BookRefFoundInDB": db_status,
+            "DBQueryException": db_error,
+            "Comments": ""
+        })
+
+    return report
+
+# === Main Execution ===
+df_input = pd.read_excel(input_file, sheet_name="TradesInFile")
+results = []
+
+for _, row in df_input.iterrows():
+    results.extend(validate_trades(row))
+
+# === Save Report ===
+df_report = pd.DataFrame(results)
+df_report.to_excel(output_file, index=False)
