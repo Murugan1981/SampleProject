@@ -1,189 +1,213 @@
-
 import pandas as pd
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, OperationFailure
-from auth import MONGO_USERNAME, MONGO_PASSWORD
-from urllib.parse import quote_plus
+from datetime import datetime
+from dateutil import parser
+from dotenv import load_dotenv
+import os
+import urllib.parse
+from pymongo.errors import ConnectionFailure, ConfigurationError
+import json
 
+# Load .env file
+load_dotenv()
 
-# STEP 1: Read Input Excel File
+# Load credentials
+MONGO_USERNAME = os.getenv("MONGOUSERNAME")
+MONGO_PASSWORD = os.getenv("MONGOPASSWORD")
+encoded_user = urllib.parse.quote_plus(MONGO_USERNAME)
+encoded_pass = urllib.parse.quote_plus(MONGO_PASSWORD)
 
-input_file = r"./shared/input/input_trades_to_validate.xlsx"
-sheet_name = "Sheet1"
-
-print("Reading input Excel file...")
+# STEP 1: Read input Excel
+input_file = r"./shared/input/pegasus_mongo_validation_input.xlsx"
+sheet_name = "MongoValidationInput"
 df = pd.read_excel(input_file, sheet_name=sheet_name)
-print(f"Found {len(df)} rows to process\n")
-
-
-# STEP 2: Prepare Result Container
 
 validation_results = []
 
-
-# STEP 3: Loop Through Each Row
-
-for index, row in df.iterrows():
+def smart_cast(value_str):
+    """
+    Intelligently cast a string value to the appropriate type.
+    Returns the value in priority order: int -> float -> datetime -> string
+    """
+    value_str = str(value_str).strip()
     
-
-    mongo_host = str(row["MongoHost"]).strip()  # e.g., localhost or cluster.mongodb.net
-    mongo_port = str(row["MongoPort"]).strip() if pd.notna(row.get("MongoPort")) else "27017"
-    database_name = str(row["DatabaseName"]).strip()
-    collection_name = str(row["CollectionName"]).strip()
-    field_name = str(row["FieldName"]).strip()
-    trade_ids_str = str(row["TradeIDs"]).strip()
+    # Check for NaN/empty
+    if not value_str or value_str.lower() in ['nan', 'none', 'null', '']:
+        return None
     
-    # Optional: Auth database (default is usually 'admin')
-    auth_db = str(row.get("AuthDatabase", "admin")).strip()
-
-    # Validate required fields
-    if not all([mongo_host, database_name, collection_name, field_name, trade_ids_str]):
-        print(f"Skipping incomplete row at index {index}")
-        continue
-
-    # Parse trade IDs
-    trade_ids = [t.strip() for t in trade_ids_str.split(",") if t.strip()]
-
-    print(f"\n{'='*60}")
-    print(f"Validating: {database_name}.{collection_name}")
-    print(f"   Host: {mongo_host}:{mongo_port}")
-    print(f"   Field: {field_name}")
-    print(f"   Trade IDs: {len(trade_ids)}")
-    print(f"{'='*60}")
-
+    # Try integer
+    if value_str.isdigit() or (value_str.startswith('-') and value_str[1:].isdigit()):
+        return int(value_str)
     
-    # STEP 4: Create MongoDB Connection String
-    
-    # URL-encode username and password to handle special characters
-    username_encoded = quote_plus(MONGO_USERNAME)
-    password_encoded = quote_plus(MONGO_PASSWORD)
-    
-    # Build connection string based on whether it's a local or Atlas cluster
-    if "mongodb.net" in mongo_host or "mongodb+srv" in mongo_host:
-        # MongoDB Atlas (SRV connection)
-        connection_string = f"mongodb+srv://{username_encoded}:{password_encoded}@{mongo_host}/{auth_db}?retryWrites=true&w=majority"
-    else:
-        # Local MongoDB or standard connection
-        connection_string = f"mongodb://{username_encoded}:{password_encoded}@{mongo_host}:{mongo_port}/{auth_db}?authSource={auth_db}"
-
-    client = None
+    # Try float
     try:
-        # Connect to MongoDB
-        print(f"Connecting to MongoDB...")
-        client = MongoClient(
-            connection_string,
-            serverSelectionTimeoutMS=10000,  # 10 second timeout
-            connectTimeoutMS=10000
-        )
-        
-        # Test connection
-        client.admin.command('ping')
-        
-        # Access database and collection
-        db = client[database_name]
-        collection = db[collection_name]
-        
-        print(f"Connected successfully!")
-
-    except ConnectionFailure as e:
-        print(f"Connection failed: {e}")
-        for trade_id in trade_ids:
-            validation_results.append({
-                "MongoHost": mongo_host,
-                "MongoPort": mongo_port,
-                "DatabaseName": database_name,
-                "CollectionName": collection_name,
-                "FieldName": field_name,
-                "TradeID": trade_id,
-                "Status": f"CONNECTION ERROR: {e}"
-            })
-        continue
-
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        for trade_id in trade_ids:
-            validation_results.append({
-                "MongoHost": mongo_host,
-                "MongoPort": mongo_port,
-                "DatabaseName": database_name,
-                "CollectionName": collection_name,
-                "FieldName": field_name,
-                "TradeID": trade_id,
-                "Status": f"ERROR: {e}"
-            })
-
-        continue
-
+        return float(value_str)
+    except ValueError:
+        pass
     
-    # STEP 5: Validate Each Trade ID
-    
-    print(f"\n Validating trade IDs...")
-    for trade_id in trade_ids:
+    # Try ISO datetime
+    if 'T' in value_str or '-' in value_str:
         try:
-            # Try to convert to int if it's numeric
-            search_value = trade_id
-            if trade_id.isdigit():
-                search_value = int(trade_id)
+            return parser.isoparse(value_str)
+        except (ValueError, parser.ParserError):
+            pass
+    
+    # Return as string
+    return value_str
+
+# STEP 2: Loop through each row of Excel
+for index, row in df.iterrows():
+    mongo_host = str(row.get("mongoHost")).strip()
+    mongo_port = str(row.get("MongoPort")).strip()
+    db_name = str(row.get("DatabaseName")).strip()
+    collection_name = str(row.get("CollectionName")).strip()
+
+    print(f"\n🔍 Processing row {index+1}: {db_name}.{collection_name} on {mongo_host}")
+
+    # STEP 3: Build dynamic query dictionary
+    query_conditions = []
+    col_names = df.columns.tolist()
+
+    for i in range(1, 50):  # Support up to 50 dynamic conditions
+        field_col = f"Field{i}"
+        op_col = f"Operator{i}"
+        val_col = f"Value{i}"
+
+        if field_col in col_names and op_col in col_names and val_col in col_names:
+            field = str(row.get(field_col)).strip()
+            op = str(row.get(op_col)).strip().lower()
+            val_raw = str(row.get(val_col)).strip()
+
+            # Skip if field is empty/nan
+            if not field or field.lower() in ['nan', 'none']:
+                continue
             
-            # Query MongoDB - check if document exists with this field value
-            query = {field_name: search_value}
-            document = collection.find_one(query, {"_id": 1})
-            
-            if document:
-                status = "FOUND"
+            # Skip if value is empty/nan
+            if not val_raw or val_raw.lower() in ['nan', 'none']:
+                print(f"⚠️ Skipping {field} - value is empty/NaN")
+                continue
+
+            # Parse value(s)
+            if op in ["in", "nin"]:
+                values = []
+                for v in val_raw.split(","):
+                    casted = smart_cast(v)
+                    if casted is not None:
+                        values.append(casted)
                 
+                if not values:
+                    print(f"⚠️ No valid values for {field} with operator {op}")
+                    continue
             else:
-                status = "MISSING"
-            
-                
-            print(f"  {icon} TradeID {trade_id}: {status}")
-            
-        except OperationFailure as e:
-            status = f"QUERY ERROR: {e}"
-            print(f"TradeID {trade_id}: {status}")
-        
-        except Exception as e:
-            status = f"ERROR: {e}"
-            print(f"TradeID {trade_id}: {status}")
+                values = smart_cast(val_raw)
+                if values is None:
+                    print(f"⚠️ Skipping {field} - could not parse value: {val_raw}")
+                    continue
+
+            # Build condition
+            if op == "eq":
+                condition = {field: values}
+            elif op == "ne":
+                condition = {field: {"$ne": values}}
+            elif op == "in":
+                condition = {field: {"$in": values}}
+            elif op == "nin":
+                condition = {field: {"$nin": values}}
+            elif op == "gt":
+                condition = {field: {"$gt": values}}
+            elif op == "gte":
+                condition = {field: {"$gte": values}}
+            elif op == "lt":
+                condition = {field: {"$lt": values}}
+            elif op == "lte":
+                condition = {field: {"$lte": values}}
+            else:
+                print(f"⚠️ Unsupported operator '{op}' for field '{field}' — skipping.")
+                continue
+
+            print(f"✓ Condition: {field} {op} {values} → {condition}")
+            query_conditions.append(condition)
+
+    if not query_conditions:
+        print(f"⚠️ No valid query conditions found in row {index+1}, skipping.")
+        validation_results.append({
+            "mongoHost": mongo_host,
+            "MongoPort": mongo_port,
+            "DatabaseName": db_name,
+            "CollectionName": collection_name,
+            "Query": "N/A",
+            "DocumentsFound": "N/A",
+            "Status": "Error: No valid query conditions"
+        })
+        continue
+
+    # STEP 4: Build mongo_query
+    flattened_query = {}
+    has_duplicate_keys = False
+    for cond in query_conditions:
+        for key in cond:
+            if key in flattened_query:
+                has_duplicate_keys = True
+                break
+            flattened_query[key] = cond[key]
+
+    mongo_query = {"$and": query_conditions} if has_duplicate_keys else flattened_query
+    print(f"📋 Final Query: {mongo_query}")
+
+    try:
+        # STEP 5: Connect to MongoDB
+        if ".mongodb.net" in mongo_host:
+            mongo_uri = f"mongodb+srv://{encoded_user}:{encoded_pass}@{mongo_host}/?retryWrites=true&w=majority"
+        else:
+            mongo_uri = f"mongodb://{encoded_user}:{encoded_pass}@{mongo_host}:{mongo_port}/"
+
+        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
+        client.admin.command("ping")
+        db = client[db_name]
+        collection = db[collection_name]
+
+        # STEP 6: Execute query
+        print(f"🔎 Executing query on {db_name}.{collection_name}...")
+        results = list(collection.find(mongo_query, {"_id": 0}).limit(100))  # Limit for safety
+        found_count = collection.count_documents(mongo_query)  # Accurate count
 
         validation_results.append({
-            "MongoHost": mongo_host,
+            "mongoHost": mongo_host,
             "MongoPort": mongo_port,
-            "DatabaseName": database_name,
+            "DatabaseName": db_name,
             "CollectionName": collection_name,
-            "FieldName": field_name,
-            "TradeID": trade_id,
-            "Status": status
+            "Query": json.dumps(mongo_query, ensure_ascii=False, default=str),
+            "DocumentsFound": found_count,
+            "Status": "Found" if found_count > 0 else "Missing"
         })
 
-    # Close connection
-    if client:
-        client.close()
-        print(f"Connection closed")
+        print(f"✅ Found {found_count} document(s).")
+        
+        # Debug: Show first result if any
+        if results:
+            print(f"📄 Sample document: {json.dumps(results[0], indent=2, default=str)[:500]}...")
 
+    except Exception as e:
+        print(f"❌ Error processing row {index+1}: {e}")
+        validation_results.append({
+            "mongoHost": mongo_host,
+            "MongoPort": mongo_port,
+            "DatabaseName": db_name,
+            "CollectionName": collection_name,
+            "Query": json.dumps(mongo_query, ensure_ascii=False, default=str),
+            "DocumentsFound": "N/A",
+            "Status": f"Error: {e}"
+        })
+        continue
+    finally:
+        try:
+            client.close()
+        except:
+            pass
 
-# STEP 6: Export Validation Results
-
-print(f"\n{'='*60}")
-print(f"SUMMARY")
-print(f"{'='*60}")
-
-output_path = r"./shared/reports/trade_validation_report_mongo.xlsx"
-result_df = pd.DataFrame(validation_results)
-
-# Calculate statistics
-total_trades = len(validation_results)
-found_trades = len(result_df[result_df['Status'] == 'FOUND'])
-missing_trades = len(result_df[result_df['Status'] == 'MISSING'])
-error_trades = total_trades - found_trades - missing_trades
-
-print(f"Total Trades Validated: {total_trades}")
-print(f"  FOUND: {found_trades}")
-print(f"  MISSING: {missing_trades}")
-print(f"  ERRORS: {error_trades}")
-
-result_df.to_excel(output_path, index=False)
-
-print(f"\n Validation completed!")
-print(f" Results saved to: {output_path}")
-print(f"{'='*60}\n")
+# STEP 7: Export to Excel
+output_file = r"./shared/reports/mongo_dynamic_validation_report.xlsx"
+df_results = pd.DataFrame(validation_results)
+df_results["RunTimestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+df_results.to_excel(output_file, index=False)
+print(f"\n📊 Report generated successfully → {output_file}")
