@@ -1,0 +1,116 @@
+import os
+import pandas as pd
+from pymongo import MongoClient
+from dotenv import load_dotenv
+from datetime import datetime
+from pymongo.errors import ConnectionFailure, ConfigurationError
+import urllib.parse
+import re
+
+# Load environment variables
+load_dotenv()
+MONGO_USERNAME = os.getenv("MONGOUSERNAME")
+MONGO_PASSWORD = os.getenv("MONGOPASSWORD")
+
+encoded_user = urllib.parse.quote_plus(MONGO_USERNAME)
+encoded_pass = urllib.parse.quote_plus(MONGO_PASSWORD)
+
+# Read Excel
+input_file = r"./shared/input/pegasus_mongo_validation_input.xlsx"
+sheet_name = "MongoValidationInput"
+df = pd.read_excel(input_file, sheet_name=sheet_name)
+
+output = []
+
+# Process each row
+for index, row in df.iterrows():
+    try:
+        mongo_host = row['MongoHost']
+        mongo_port = str(row['MongoPort'])
+        database_name = row['DatabaseName']
+        collection_name = row['CollectionName']
+
+        field1 = row.get('Field1')
+        operator1 = row.get('Operator1')
+        value1 = row.get('Value1')
+
+        field2 = row.get('Field2')
+        operator2 = row.get('Operator2')
+        value2 = row.get('Value2')
+
+        field3 = row.get('Field3')
+        operator3 = row.get('Operator3')
+        value3 = row.get('Value3')
+
+        print(f"\n🔍 Processing row {index + 1}: {database_name}.{collection_name} on {mongo_host}")
+
+        # Connect
+        mongo_uri = f"mongodb+srv://{encoded_user}:{encoded_pass}@{mongo_host}"
+        client = MongoClient(mongo_uri)
+        client.admin.command('ping')
+        print("✅ Connected")
+
+        db = client[database_name]
+        collection = db[collection_name]
+
+        # Build query
+        query = {"$and": []}
+
+        # Field 1
+        if pd.notna(field1) and pd.notna(value1):
+            if str(operator1).lower() == "eq":
+                query["$and"].append({field1: str(value1)})
+            elif str(operator1).lower() == "in":
+                query["$and"].append({field1: {"$in": str(value1).split(',')}})
+
+        # Field 2
+        if pd.notna(field2) and pd.notna(value2):
+            if str(operator2).lower() == "eq":
+                query["$and"].append({field2: str(value2)})
+            elif str(operator2).lower() == "in":
+                query["$and"].append({field2: {"$in": str(value2).split(',')}})
+
+        # Field 3 — Special ISODate handling
+        if pd.notna(field3) and pd.notna(value3):
+            if str(operator3).lower() == "eq":
+                # Detect ISODate(...) format
+                if "ISODate" in str(value3):
+                    match = re.search(r'ISODate\("(.+?)"\)', str(value3))
+                    if match:
+                        iso_str = match.group(1)
+                        parsed_date = datetime.strptime(iso_str, "%Y-%m-%dT%H:%M:%S.%f%z")
+                        query["$and"].append({field3: parsed_date})
+                    else:
+                        raise ValueError(f"Invalid ISODate format in Value3: {value3}")
+                else:
+                    query["$and"].append({field3: str(value3)})
+
+        print("📦 Final Query:", query)
+
+        # Query execution
+        result = collection.find_one(query, {"_id": 0})
+        result_status = "Found" if result else "Not Found"
+
+        output.append({
+            "MongoHost": mongo_host,
+            "Database": database_name,
+            "Collection": collection_name,
+            "Query": str(query),
+            "Result": result_status
+        })
+
+    except Exception as e:
+        print("❌ Error:", str(e))
+        output.append({
+            "MongoHost": mongo_host,
+            "Database": database_name,
+            "Collection": collection_name,
+            "Query": "ERROR",
+            "Result": str(e)
+        })
+
+# Save output
+df_out = pd.DataFrame(output)
+report_path = "./shared/reports/mongo_validation_report.xlsx"
+df_out.to_excel(report_path, index=False)
+print(f"\n✅ Report saved to ➜ {report_path}")
