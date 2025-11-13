@@ -1,0 +1,103 @@
+import pandas as pd
+from pymongo import MongoClient
+from datetime import datetime
+from dotenv import load_dotenv
+import os
+import urllib.parse
+from bson import json_util
+import json
+
+# Load environment variables
+load_dotenv()
+MONGO_USERNAME = os.getenv("MONGOUSERNAME")
+MONGO_PASSWORD = os.getenv("MONGOPASSWORD")
+encoded_user = urllib.parse.quote_plus(MONGO_USERNAME)
+encoded_pass = urllib.parse.quote_plus(MONGO_PASSWORD)
+
+# Read input
+input_file = r"./shared/input/pegasus_mongo_validation_input.xlsx"
+sheet_name = "MongoValidationInput"
+df = pd.read_excel(input_file, sheet_name=sheet_name)
+
+# Output report rows
+report_rows = []
+
+# Iterate over each row
+for index, row in df.iterrows():
+    mongo_host = row["mongoHost"]
+    mongo_port = str(row["MongoPort"])
+    database_name = row["DatabaseName"]
+    collection_name = row["CollectionName"]
+
+    field1 = row["Field1"]
+    operator1 = row["Operator1"]
+    value1 = row["Value1"]
+
+    field2 = row["Field2"]
+    operator2 = row["Operator2"]
+    raw_value2 = str(row["Value2"])
+    value2_list = [v.strip() for v in raw_value2.split(",")]
+
+    field3 = row.get("Field3")
+    operator3 = row.get("Operator3")
+    value3 = row.get("Value3")
+
+    # Build connection string
+    connection_string = f"mongodb+srv://{encoded_user}:{encoded_pass}@{mongo_host}"
+    client = MongoClient(connection_string)
+    db = client[database_name]
+    collection = db[collection_name]
+
+    # Prepare query
+    query_conditions = []
+
+    # Field1 condition
+    if operator1.lower() == "eq":
+        query_conditions.append({field1: value1})
+
+    # Field2 condition ($in for multiple trades)
+    if operator2.lower() == "in":
+        query_conditions.append({field2: {"$in": value2_list}})
+
+    # Field3 condition (ISODate passed as string)
+    if pd.notna(field3) and pd.notna(operator3) and pd.notna(value3):
+        if value3.startswith("ISODate("):
+            iso_str = value3.strip()[8:-1].replace('"', '')
+            try:
+                iso_dt = datetime.strptime(iso_str, "%Y-%m-%dT%H:%M:%S.000+0000")
+                query_conditions.append({field3: iso_dt})
+            except Exception as e:
+                print(f"Invalid ISODate format for Value3 in row {index+2}: {e}")
+                continue
+        else:
+            if operator3.lower() == "eq":
+                query_conditions.append({field3: value3})
+
+    final_query = {"$and": query_conditions}
+
+    # Run query ONCE for all values
+    print(f"\n🔍 Running Query for Row {index+2}: {json.dumps(final_query, default=json_util.default)}")
+    try:
+        documents = list(collection.find(final_query, {"_id": 0}))
+        matched_values = set([doc.get(field2) for doc in documents])
+    except Exception as e:
+        print(f"❌ Error querying MongoDB for row {index+2}: {e}")
+        matched_values = set()
+
+    # Create row-wise result for each trade in value2_list
+    for trade in value2_list:
+        result = {
+            "MongoHost": mongo_host,
+            "MongoPort": mongo_port,
+            "DatabaseName": database_name,
+            "CollectionName": collection_name,
+            "Trade": trade,
+            "Found?": "FOUND" if trade in matched_values else "NOT FOUND",
+            "Query_Used": json.dumps(final_query, default=json_util.default)
+        }
+        report_rows.append(result)
+
+# Save output
+output_df = pd.DataFrame(report_rows)
+output_df.to_excel("./shared/reports/mongo_dynamic_validation_report.xlsx", index=False)
+print("✅ Report saved to ./shared/reports/mongo_dynamic_validation_report.xlsx")
