@@ -1,97 +1,67 @@
-# core/orchestrator.py
+import requests
+import xml.etree.ElementTree as ET
+import pandas as pd
+import os
 
-import json
-from datetime import datetime
-from .task_registry import TASK_REGISTRY
+def flatten_xml(element, parent_path="", flattened=None):
+    """
+    Recursively flattens XML nodes into key-path: value format.
+    """
+    if flattened is None:
+        flattened = {}
 
-def run_suite(env_name: str, suite_config_path: str):
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"🚀 Running suite: {suite_config_path} | Environment: {env_name} | Run ID: {run_id}")
+    tag = element.tag.split("}")[-1]  # Remove namespace
+    path = f"{parent_path}.{tag}" if parent_path else tag
 
-    with open(suite_config_path, "r") as f:
-        suite_cfg = json.load(f)
+    # If the element has text, save it
+    text = element.text.strip() if element.text and element.text.strip() else None
+    if text:
+        flattened[path] = text
 
-    tasks = suite_cfg.get("tasks", [])
-    for task in tasks:
-        name = task["name"]
-        enabled = task.get("enabled", True)
-        params = task.get("params", {})
+    # Recurse into children
+    for child in element:
+        flatten_xml(child, path, flattened)
 
-        if not enabled:
-            print(f"⏩ Skipping disabled task: {name}")
-            continue
+    return flattened
 
-        task_fn = TASK_REGISTRY.get(name)
-        if not task_fn:
-            print(f"❌ Task '{name}' not found in registry")
-            continue
+def CDWscraper(base_url, trade_id, batch_date, output_excel):
+    full_url = f"{base_url.rstrip('/')}/{trade_id}/{batch_date}"
+    print(f"🔗 Fetching URL: {full_url}")
 
-        print(f"\n▶️ Executing task: {name}")
-        result = task_fn(env_cfg={}, params=params, run_id=run_id)
-        print(f"✅ Task finished: {name} | Result: {result['status']}\n")
+    try:
+        # OPTIONAL: Add auth=(username, password)
+        response = requests.get(full_url, timeout=20)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"❌ Failed to fetch data: {e}")
+        return
 
+    try:
+        root = ET.fromstring(response.text)
+        flat_data = flatten_xml(root)
 
+        # Add trade identifiers
+        flat_data["TRADE_ID"] = trade_id
+        flat_data["BATCH_DATE"] = batch_date
+        flat_data["CDW_URL"] = full_url
+        flat_data["CDW_STATUS"] = "SUCCESS"
 
+    except Exception as e:
+        flat_data = {
+            "TRADE_ID": trade_id,
+            "BATCH_DATE": batch_date,
+            "CDW_URL": full_url,
+            "CDW_STATUS": f"XML_PARSE_FAIL: {e}"
+        }
 
+    # Write to Excel
+    df_new = pd.DataFrame([flat_data])
+    if os.path.exists(output_excel):
+        df_existing = pd.read_excel(output_excel)
+        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+    else:
+        df_combined = df_new
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# run_risk_suite.py
-
-import argparse
-from core.orchestrator import run_suite
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="UAT", help="Environment name")
-    parser.add_argument("--suite", default="./config/suite_files_check.json", help="Suite config path")
-
-    args = parser.parse_args()
-    run_suite(args.env, args.suite)
-
-
-
-
-config/suite_files_check.json
-
-{
-  "suite_name": "CheckFilesInFolder",
-  "tasks": [
-    {
-      "name": "files_in_folder",
-      "enabled": true,
-      "params": {}
-    }
-  ]
-}
-
-
-
-
-
-
-
-run
-
-
-python run_risk_suite.py --env UAT --suite ./config/suite_files_check.json
-
+    os.makedirs(os.path.dirname(output_excel), exist_ok=True)
+    df_combined.to_excel(output_excel, index=False)
+    print(f"✅ Trade {trade_id} CDW data saved to: {output_excel}")
