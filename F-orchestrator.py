@@ -29,3 +29,69 @@ def run_suite(env_name: str, suite_config_path: str):
         print(f"\n▶️ Executing task: {name}")
         result = task_fn(env_cfg={}, params=params, run_id=run_id)
         print(f"✅ Task finished: {name} | Result: {result['status']}\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# run_risk_suite.py
+
+import argparse
+from core.orchestrator import run_suite
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env", default="UAT", help="Environment name")
+    parser.add_argument("--suite", default="./config/suite_files_check.json", help="Suite config path")
+
+    args = parser.parse_args()
+    run_suite(args.env, args.suite)
+
+
+
+
+config/suite_files_check.json
+
+{
+  "suite_name": "CheckFilesInFolder",
+  "tasks": [
+    {
+      "name": "files_in_folder",
+      "enabled": true,
+      "params": {}
+    }
+  ]
+}
+
+
+
+
+
+
+
+run
+
+
+python run_risk_suite.py --env UAT --suite ./config/suite_files_check.json
+
