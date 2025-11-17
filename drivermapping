@@ -1,14 +1,20 @@
 import os
+import sys
 import pandas as pd
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Make sure we can import from the project root
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Load .env file from root directory
 load_dotenv()
+
+# Get mapping file path from .env
 mapping_file = os.getenv("SCENARIO_MAPPING_FILE")
 
-# Import scenario task functions
-from tasks.files_in_folder_task import run_files_in_folder_task
-from tasks.trades_in_file_task import run_trades_in_file_task
+# Import all task handlers and helpers
+from libs.files_in_folder import run_files_in_folder
+from libs.trades_in_file import run_trades_in_file
 from libs.CDWHelper import CDWscraper
 
 
@@ -18,13 +24,18 @@ def execute_scenario(scenario: str, datafile: str, rows: str):
 
     match scenario:
         case "FILES_IN_FOLDER":
-            run_files_in_folder_task(env_cfg={}, params={"datafile": datafile, "rows": rows}, run_id="ManualRun")
+            run_files_in_folder(datafile=datafile, rows=rows)
 
         case "TRADES_IN_FILES":
-            run_trades_in_file_task(env_cfg={}, params={"datafile": datafile, "rows": rows}, run_id="ManualRun")
+            run_trades_in_file(datafile=datafile, rows=rows)
 
         case "EXTRACT_CDW":
-            df = pd.read_csv(datafile)
+            try:
+                df = pd.read_csv(datafile)
+            except Exception as e:
+                print(f"❌ Failed to read CDW data file: {e}")
+                return
+
             if rows.upper() == "ALL":
                 for _, row in df.iterrows():
                     CDWscraper(
@@ -34,17 +45,20 @@ def execute_scenario(scenario: str, datafile: str, rows: str):
                         output_excel=row["output_excel"]
                     )
             else:
-                row_index = int(rows)
-                if row_index < len(df):
-                    row = df.iloc[row_index]
-                    CDWscraper(
-                        base_url=row["base_url"],
-                        trade_id=row["trade_id"],
-                        batch_date=row["batch_date"],
-                        output_excel=row["output_excel"]
-                    )
-                else:
-                    print(f"⚠️ Row index {rows} out of range in {datafile}")
+                try:
+                    row_index = int(rows)
+                    if row_index < len(df):
+                        row = df.iloc[row_index]
+                        CDWscraper(
+                            base_url=row["base_url"],
+                            trade_id=row["trade_id"],
+                            batch_date=row["batch_date"],
+                            output_excel=row["output_excel"]
+                        )
+                    else:
+                        print(f"⚠️ Row index {row_index} out of range in {datafile}")
+                except Exception as e:
+                    print(f"❌ Invalid row index: {rows} — {e}")
 
         case _:
             print(f"⚠️ Unknown SCENARIO type: {scenario}")
@@ -55,7 +69,11 @@ def run_driver():
         print(f"❌ Mapping file not found or not set: {mapping_file}")
         return
 
-    df = pd.read_csv(mapping_file)
+    try:
+        df = pd.read_csv(mapping_file)
+    except Exception as e:
+        print(f"❌ Failed to read mapping file: {e}")
+        return
 
     for idx, row in df.iterrows():
         scenario = str(row.get("SCENARIO", "")).strip()
