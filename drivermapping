@@ -1,0 +1,75 @@
+import os
+import pandas as pd
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+mapping_file = os.getenv("SCENARIO_MAPPING_FILE")
+
+# Import scenario task functions
+from tasks.files_in_folder_task import run_files_in_folder_task
+from tasks.trades_in_file_task import run_trades_in_file_task
+from libs.CDWHelper import CDWscraper
+
+
+def execute_scenario(scenario: str, datafile: str, rows: str):
+    print(f"\n▶️ Running Scenario: {scenario}")
+    print(f"📄 Data File: {datafile} | Rows: {rows}")
+
+    match scenario:
+        case "FILES_IN_FOLDER":
+            run_files_in_folder_task(env_cfg={}, params={"datafile": datafile, "rows": rows}, run_id="ManualRun")
+
+        case "TRADES_IN_FILES":
+            run_trades_in_file_task(env_cfg={}, params={"datafile": datafile, "rows": rows}, run_id="ManualRun")
+
+        case "EXTRACT_CDW":
+            df = pd.read_csv(datafile)
+            if rows.upper() == "ALL":
+                for _, row in df.iterrows():
+                    CDWscraper(
+                        base_url=row["base_url"],
+                        trade_id=row["trade_id"],
+                        batch_date=row["batch_date"],
+                        output_excel=row["output_excel"]
+                    )
+            else:
+                row_index = int(rows)
+                if row_index < len(df):
+                    row = df.iloc[row_index]
+                    CDWscraper(
+                        base_url=row["base_url"],
+                        trade_id=row["trade_id"],
+                        batch_date=row["batch_date"],
+                        output_excel=row["output_excel"]
+                    )
+                else:
+                    print(f"⚠️ Row index {rows} out of range in {datafile}")
+
+        case _:
+            print(f"⚠️ Unknown SCENARIO type: {scenario}")
+
+
+def run_driver():
+    if not mapping_file or not os.path.exists(mapping_file):
+        print(f"❌ Mapping file not found or not set: {mapping_file}")
+        return
+
+    df = pd.read_csv(mapping_file)
+
+    for idx, row in df.iterrows():
+        scenario = str(row.get("SCENARIO", "")).strip()
+        execute_flag = str(row.get("EXECUTE", "")).strip().upper()
+
+        if execute_flag != "YES":
+            print(f"⏩ Skipping scenario [{scenario}] (EXECUTE != YES)")
+            continue
+
+        datafile = str(row.get("DATAFILE1", "")).strip()
+        rows = str(row.get("ROWS", "ALL")).strip()
+
+        execute_scenario(scenario, datafile, rows)
+
+
+if __name__ == "__main__":
+    run_driver()
