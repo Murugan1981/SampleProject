@@ -1,10 +1,10 @@
 import os
 import pandas as pd
-import requests
+import subprocess
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 
-# Load .env values
+# Load credentials from .env
 load_dotenv()
 USERNAME = os.getenv("USERNAME")
 PASSWORD = os.getenv("PASSWORD")
@@ -13,7 +13,37 @@ PASSWORD = os.getenv("PASSWORD")
 INPUT_FILE = "./shared/input/CDW_Trade_Input.xlsx"
 OUTPUT_FILE = "./shared/reports/cdw_trade_validation_report.xlsx"
 
-# Read input
+# Function to fetch CDW response using curl
+def fetch_cdw_response(cdwurl):
+    try:
+        command = [
+            'curl', '-u', f'{USERNAME}:{PASSWORD}',
+            '-H', 'Accept: application/xml',
+            '-H', 'Content-Type:application/xml',
+            cdwurl
+        ]
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        if result.returncode == 0:
+            print(f"[DEBUG] curl output fetched successfully")
+            return result.stdout
+        else:
+            print(f"[DEBUG] curl failed with return code {result.returncode}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred: {e}")
+        return None
+
+# Function to extract tag value using namespace
+def extract_field_value(xml_root, tag, ns_prefix, ns_map):
+    if xml_root is None:
+        return "N/A"
+    try:
+        element = xml_root.find(f".//{ns_prefix}:{tag}", namespaces=ns_map)
+        return element.text if element is not None else "NODENOTFOUND"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+# Read input data
 df_input = pd.read_excel(INPUT_FILE, sheet_name=0)
 base_url = df_input.loc[0, "CDWBASEURL"]
 batch_date = df_input.loc[0, "BATCHDATE"]
@@ -22,53 +52,43 @@ field1 = df_input.loc[0, "FIELD1"]
 field2 = df_input.loc[0, "FIELD2"]
 namespace_str = df_input.loc[0, "namespace"]
 
-# Parse namespace (e.g., 'fpml:http://www.fpml.org/FpML-5/reporting')
-prefix, uri = namespace_str.split(":", 1)
-ns = {prefix: uri}
+# Parse namespace
+ns_prefix, ns_uri = namespace_str.split(":", 1)
+ns_map = {ns_prefix: ns_uri}
 
-# Helper to fetch and parse XML
-def fetch_and_parse_xml(url):
-    try:
-        response = requests.get(url, auth=(USERNAME, PASSWORD), timeout=10)
-        if response.status_code == 200:
-            return "FOUND", ET.fromstring(response.text), ""
-        else:
-            return "MISSING", None, f"HTTP {response.status_code}"
-    except Exception as e:
-        return "MISSING", None, str(e)
-
-# Helper to extract value from XML
-def extract_field_value(root, tag):
-    if root is None:
-        return "N/A"
-    element = root.find(f".//{prefix}:{tag}", ns)
-    return element.text if element is not None else "NODENOTFOUND"
-
-# Process all trades
+# Final output rows
 results = []
+
+# Loop over each trade
 for trade_id in trade_ids:
     trade_id = trade_id.strip()
-    full_url = f"{base_url}/{trade_id}?on={batch_date}"
-    url_status, xml_root, error = fetch_and_parse_xml(full_url)
-    
+    cdwurl = f"{base_url}/{trade_id}?on={batch_date}"
+    xml_text = fetch_cdw_response(cdwurl)
+
     row = {
         "TRADEID": trade_id,
-        "CDWURL": full_url,
-        "URLRESPONSE": url_status
+        "CDWURL": cdwurl,
+        "URLRESPONSE": "FOUND" if xml_text else "MISSING"
     }
 
-    if url_status == "FOUND":
-        row["TRADE_STATUS"] = extract_field_value(xml_root, field1)
-        row["TRADE_SETTLEMENT_STATUS"] = extract_field_value(xml_root, field2)
-        row["COMMENTS"] = ""
+    if xml_text:
+        try:
+            xml_root = ET.fromstring(xml_text)
+            row["TRADE_STATUS"] = extract_field_value(xml_root, field1, ns_prefix, ns_map)
+            row["TRADE_SETTLEMENT_STATUS"] = extract_field_value(xml_root, field2, ns_prefix, ns_map)
+            row["COMMENTS"] = ""
+        except Exception as e:
+            row["TRADE_STATUS"] = "PARSE_ERROR"
+            row["TRADE_SETTLEMENT_STATUS"] = "PARSE_ERROR"
+            row["COMMENTS"] = str(e)
     else:
         row["TRADE_STATUS"] = "N/A"
         row["TRADE_SETTLEMENT_STATUS"] = "N/A"
-        row["COMMENTS"] = error
-    
+        row["COMMENTS"] = "No response or curl error"
+
     results.append(row)
 
-# Save results
+# Save output
 df_output = pd.DataFrame(results)
 df_output.to_excel(OUTPUT_FILE, index=False)
-print(f"✅ Validation complete. Output saved to: {OUTPUT_FILE}")
+print(f"✅ Report saved to {OUTPUT_FILE}")
