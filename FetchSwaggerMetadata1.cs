@@ -1,201 +1,144 @@
-#nullable enable
-
 using System;
-using System.IO;
-using System.Net;
-using System.Text.Json;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
-using System.Text;
 using System.Net.Http;
+using System.Text.Json;
 using System.Threading.Tasks;
-using System.Text.Json.Nodes;
-using Newtonsoft.Json.Linq;
+using TenantExtractor.Helpers;
 
 namespace TenantExtractor.Services
 {
     public static class FetchSwaggerMetadata
     {
-        private static readonly string rawPath = Path.Combine("shared", "raw");
         private static readonly string reportPath = Path.Combine("shared", "reports");
-        private static readonly string inputPath = Path.Combine("shared", "input");
-        private static readonly string jsonFile = Path.Combine(inputPath, "ApiTestData.json");
-
-        private static string? systemFilter;
-        private static string? regionFilter;
-        private static string? urlTypeFilter;
-        private static string? username;
-        private static string? password;
 
         public static async Task RunAsync()
         {
             Console.WriteLine("Executing Swagger Metadata Fetcher...");
-            LoadEnv();
+
             await ProcessSheetAsync("PRD");
             await ProcessSheetAsync("UAT");
-            Console.WriteLine("✅ Swagger metadata extraction completed.");
-        }
 
-        private static void LoadEnv()
-        {
-            DotNetEnv.Env.Load();
-            username = Environment.GetEnvironmentVariable("USERNAME");
-            password = Environment.GetEnvironmentVariable("PASSWORD");
-
-            var json = File.ReadAllText(jsonFile);
-            var config = JsonNode.Parse(json);
-
-            systemFilter = config?["System"]?.ToString();
-            regionFilter = config?["Region"]?.ToString();
-            urlTypeFilter = config?["URLTYPE"]?.ToString();
-
-            Directory.CreateDirectory(reportPath);
+            Console.WriteLine("Swagger metadata extraction completed.");
         }
 
         private static async Task ProcessSheetAsync(string env)
         {
-            var inputCsv = Path.Combine(reportPath, $"tenant_{env}.csv");
-            if (!File.Exists(inputCsv))
+            var inputCsvPath = Path.Combine(reportPath, $"tenant_{env.ToLower()}.csv");
+
+            if (!File.Exists(inputCsvPath))
             {
-                Console.WriteLine($"❌ Input file not found: {inputCsv}");
+                Console.WriteLine($"❌ CSV file not found: {inputCsvPath}");
                 return;
             }
 
-            var lines = File.ReadAllLines(inputCsv);
-            if (lines.Length < 2)
+            var lines = File.ReadAllLines(inputCsvPath).ToList();
+            if (lines.Count < 2)
             {
-                Console.WriteLine("❌ CSV has no data rows.");
+                Console.WriteLine("❌ CSV file is empty or has no data rows.");
                 return;
             }
 
-            var headers = lines[0].Split(',');
-            int systemIndex = Array.FindIndex(headers, h => h.Trim().Equals("SYSTEM", StringComparison.OrdinalIgnoreCase));
-            int regionIndex = Array.FindIndex(headers, h => h.Trim().Equals("REGION", StringComparison.OrdinalIgnoreCase));
-            int urltypeIndex = Array.FindIndex(headers, h => h.Trim().Equals("URLTYPE", StringComparison.OrdinalIgnoreCase));
+            // Normalize headers
+            var headers = lines[0].Split(',').Select(h => h.Trim().ToLower()).ToList();
 
-            int baseurlIndex = Array.FindIndex(headers, h =>
-                h.Trim().ToLower().Contains("addonlinks_dataservice_url"));
+            // Detect required columns dynamically
+            int systemIdx = headers.FindIndex(h => h == "system");
+            int regionIdx = headers.FindIndex(h => h == "region");
+            int urlTypeIdx = headers.FindIndex(h => h == "urltype");
+            int baseUrlIdx = headers.FindIndex(h => h.Contains("dataservice_url"));
 
-            if (systemIndex == -1 || regionIndex == -1 || urltypeIndex == -1 || baseurlIndex == -1)
+            if (systemIdx == -1 || regionIdx == -1 || urlTypeIdx == -1 || baseUrlIdx == -1)
             {
-                Console.WriteLine("❌ Required column(s) not found.");
+                Console.WriteLine("❌ Required column(s) not found. Check header names.");
                 return;
             }
 
-            var metadata = new List<Dictionary<string, string>>();
-            var errors = new List<Dictionary<string, string>>();
+            var allMetadata = new List<Dictionary<string, string>>();
 
-            foreach (var line in lines.Skip(1))
+            for (int i = 1; i < lines.Count; i++)
             {
-                var cols = line.Split(',');
+                var cols = lines[i].Split(',');
 
-                string system = cols[systemIndex].Trim();
-                string region = cols[regionIndex].Trim();
-                string urltype = cols[urltypeIndex].Trim();
-                string baseurl = cols[baseurlIndex].Trim();
-
-                if (system != systemFilter || region != regionFilter || urltype != urlTypeFilter)
-                    continue;
-
-                if (string.IsNullOrWhiteSpace(baseurl) || baseurl.ToLower() == "nan")
+                if (cols.Length <= Math.Max(Math.Max(systemIdx, regionIdx), baseUrlIdx))
                 {
-                    Console.WriteLine($"⚠️ Skipping blank base URL for {system} | {region} | {urltype}");
+                    Console.WriteLine($"⚠️ Skipping row {i + 1} due to missing columns.");
                     continue;
                 }
 
-                string swaggerUrl = system.ToLower() == "jil"
-                    ? $"{baseurl}/swagger/docs/v1"
-                    : $"{baseurl}/swagger/v1/swagger.json";
+                string system = cols[systemIdx].Trim();
+                string region = cols[regionIdx].Trim();
+                string urltype = cols[urlTypeIdx].Trim();
+                string baseurl = cols[baseUrlIdx].Trim();
 
-                Console.WriteLine($"📥 Fetching Swagger for {system} | {region} | {urltype}");
-                Console.WriteLine($"URL: {swaggerUrl}");
+                if (string.IsNullOrWhiteSpace(baseurl))
+                    continue;
 
-                var (results, error) = await FetchEndpoints(baseurl, swaggerUrl, system, region, env, urltype);
-                if (error != null) errors.Add(error);
-                else metadata.AddRange(results);
+                string swaggerUrl = baseurl.EndsWith("/") ? baseurl : baseurl + "/";
+                swaggerUrl += system.ToLower() == "jil" ? "swagger/docs/v1" : "swagger/v1/swagger.json";
+
+                Console.WriteLine($"📦 Fetching Swagger for: {system} | {region} | {urltype} -> {swaggerUrl}");
+
+                try
+                {
+                    var result = await ExtractEndpointsFromSwagger(swaggerUrl);
+                    foreach (var entry in result)
+                    {
+                        entry["System"] = system;
+                        entry["Region"] = region;
+                        entry["URLTYPE"] = urltype;
+                        entry["SwaggerURL"] = swaggerUrl;
+                    }
+
+                    allMetadata.AddRange(result);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Failed to fetch: {swaggerUrl} - {ex.Message}");
+                }
             }
 
-            CsvWriter.WriteDictionaries(Path.Combine(reportPath, $"{env}_Metadata.csv"), metadata);
-            if (errors.Any())
-                CsvWriter.WriteDictionaries(Path.Combine(reportPath, $"{env}_Metadata_Error.csv"), errors);
+            var outputPath = Path.Combine(reportPath, $"{env}_Metadata.csv");
+            CsvWriter.WriteDictionaries(outputPath, allMetadata);
         }
 
-        private static async Task<(List<Dictionary<string, string>>, Dictionary<string, string>? error)> FetchEndpoints(
-            string baseurl,
-            string swaggerUrl,
-            string system,
-            string region,
-            string env,
-            string urltype)
+        private static async Task<List<Dictionary<string, string>>> ExtractEndpointsFromSwagger(string swaggerUrl)
         {
-            try
+            using var httpClient = new HttpClient();
+            var json = await httpClient.GetStringAsync(swaggerUrl);
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var results = new List<Dictionary<string, string>>();
+
+            if (!root.TryGetProperty("paths", out var paths))
+                return results;
+
+            foreach (var path in paths.EnumerateObject())
             {
-                using var handler = new HttpClientHandler { Credentials = new NetworkCredential(username, password) };
-                using var client = new HttpClient(handler);
-                var response = await client.GetAsync(swaggerUrl);
-                if (!response.IsSuccessStatusCode)
+                string endpoint = path.Name;
+
+                foreach (var method in path.Value.EnumerateObject())
                 {
-                    return (new(), new Dictionary<string, string>
+                    var row = new Dictionary<string, string>
                     {
-                        ["System"] = system,
-                        ["Region"] = region,
-                        ["Env"] = env,
-                        ["SwaggerURL"] = swaggerUrl,
-                        ["URLTYPE"] = urltype,
-                        ["Error"] = $"HTTP {(int)response.StatusCode}"
-                    });
+                        ["Endpoint"] = endpoint,
+                        ["Method"] = method.Name.ToUpper()
+                    };
+
+                    if (method.Value.TryGetProperty("tags", out var tags))
+                        row["Tags"] = string.Join(";", tags.EnumerateArray().Select(t => t.GetString()));
+
+                    if (method.Value.TryGetProperty("summary", out var summary))
+                        row["Summary"] = summary.GetString() ?? "";
+
+                    results.Add(row);
                 }
-
-                var json = await response.Content.ReadAsStringAsync();
-                var root = JObject.Parse(json);
-                var results = new List<Dictionary<string, string>>();
-                var paths = root["paths"]?.ToObject<Dictionary<string, JObject>>() ?? new();
-
-                foreach (var (endpoint, methods) in paths)
-                {
-                    foreach (var (method, detail) in methods)
-                    {
-                        string tag = detail["tags"]?.FirstOrDefault()?.ToString() ?? "";
-                        string responseCode = detail["responses"]?.First?.Path.Split('.').Last() ?? "";
-                        string responseDesc = detail["responses"]?.First?.First?["description"]?.ToString() ?? "";
-                        var parameters = detail["parameters"]?.ToObject<List<JObject>>() ?? new();
-
-                        string paramStr = string.Join("; ",
-                            parameters.Select(p =>
-                                $"{p["name"]} (in:{p["in"]},type:{p["schema"]?["type"] ?? "object"},required{p["required"] ?? false})"));
-
-                        results.Add(new Dictionary<string, string>
-                        {
-                            ["System"] = system,
-                            ["Region"] = region,
-                            ["Env"] = env,
-                            ["BASEURL"] = baseurl,
-                            ["SwaggerURL"] = swaggerUrl,
-                            ["URLTYPE"] = urltype,
-                            ["Method"] = method.ToUpper(),
-                            ["Endpoint"] = endpoint,
-                            ["Tags"] = tag,
-                            ["Response_Code"] = responseCode,
-                            ["Response_Description"] = responseDesc,
-                            ["Parameters"] = paramStr
-                        });
-                    }
-                }
-
-                return (results, null);
             }
-            catch (Exception ex)
-            {
-                return (new(), new Dictionary<string, string>
-                {
-                    ["System"] = system,
-                    ["Region"] = region,
-                    ["Env"] = env,
-                    ["SwaggerURL"] = swaggerUrl,
-                    ["URLTYPE"] = urltype,
-                    ["Error"] = ex.Message
-                });
-            }
+
+            return results;
         }
     }
 }
