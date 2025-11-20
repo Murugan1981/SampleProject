@@ -1,83 +1,54 @@
-using Newtonsoft.Json;
-using DotNetEnv;
-using System.Net;
-using System.Net.Http;
+#nullable enable
 
-public class TenantFetcher
+using System.IO;
+using System.Linq;
+using System.Collections.Generic;
+using OfficeOpenXml;
+using TenantExtractor.Models;
+// Optional alias to avoid any LicenseContext ambiguity:
+// using EPPLicenseContext = OfficeOpenXml.LicenseContext;
+
+namespace TenantExtractor.Services
 {
-    private readonly string RAW_PATH = Path.Combine("shared", "raw");
-
-    public TenantFetcher()
+    public static class ExcelWriter
     {
-        Directory.CreateDirectory(RAW_PATH);
-    }
-
-    private HttpClient GetHttpClient(string username, string password)
-    {
-        if (string.IsNullOrWhiteSpace(username))
-            throw new ArgumentNullException(nameof(username));
-
-        if (string.IsNullOrWhiteSpace(password))
-            throw new ArgumentNullException(nameof(password));
-
-        // Split domain\username safely
-        var parts = username.Split('\\');
-        string domain = parts.Length > 1 ? parts[0] : "";
-        string user = parts.Length > 1 ? parts[1] : parts[0];
-
-        var handler = new HttpClientHandler
+        public static void Save(List<TenantRecord> prd, List<TenantRecord> uat, string rawPath)
         {
-            Credentials = new NetworkCredential(user, password, domain)
-        };
+            // Either keep the fully qualified form:
+            OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
+            // Or, if you used the alias above:
+            // ExcelPackage.LicenseContext = EPPLicenseContext.NonCommercial;
 
-        return new HttpClient(handler);
-    }
+            string excelPath = Path.Combine(rawPath, "tenant_data.xlsx");
 
-    public async Task<List<TenantRecord>> Fetch(string url, string username, string password)
-    {
-        if (string.IsNullOrWhiteSpace(url))
-            throw new ArgumentNullException(nameof(url));
+            using (var package = new ExcelPackage())
+            {
+                var prdSheet = package.Workbook.Worksheets.Add("PRD");
+                var uatSheet = package.Workbook.Worksheets.Add("UAT");
 
-        var client = GetHttpClient(username, password);
+                WriteSheet(prdSheet, prd);
+                WriteSheet(uatSheet, uat);
 
-        var response = await client.GetAsync(url);
-        response.EnsureSuccessStatusCode();
-
-        string json = await response.Content.ReadAsStringAsync();
-
-        // JSON can be null → safe deserialization
-        var result = JsonConvert.DeserializeObject<List<TenantRecord>>(json)
-                     ?? new List<TenantRecord>();
-
-        return result;
-    }
-
-    public async Task Run()
-    {
-        Env.Load();
-
-        string? prdUrl = Environment.GetEnvironmentVariable("PRD_URL");
-        string? uatUrl = Environment.GetEnvironmentVariable("UAT_URL");
-        string? username = Environment.GetEnvironmentVariable("USERNAME");
-        string? password = Environment.GetEnvironmentVariable("PASSWORD");
-
-        if (string.IsNullOrWhiteSpace(prdUrl) ||
-            string.IsNullOrWhiteSpace(uatUrl) ||
-            string.IsNullOrWhiteSpace(username) ||
-            string.IsNullOrWhiteSpace(password))
-        {
-            throw new Exception("Missing values in .env file. Check PRD_URL, UAT_URL, USERNAME, PASSWORD.");
+                package.SaveAs(new FileInfo(excelPath));
+            }
         }
 
-        var prdData = await Fetch(prdUrl, username, password);
-        var uatData = await Fetch(uatUrl, username, password);
+        private static void WriteSheet(OfficeOpenXml.ExcelWorksheet sheet, List<TenantRecord> data)
+        {
+            var flattened = data.Select(TenantFlattener.Flatten).ToList();
+            var headers = flattened.SelectMany(x => x.Keys).Distinct().ToList();
 
-        File.WriteAllText(Path.Combine(RAW_PATH, "tenant_prd.json"),
-            JsonConvert.SerializeObject(prdData, Formatting.Indented));
+            for (int col = 0; col < headers.Count; col++)
+                sheet.Cells[1, col + 1].Value = headers[col];
 
-        File.WriteAllText(Path.Combine(RAW_PATH, "tenant_uat.json"),
-            JsonConvert.SerializeObject(uatData, Formatting.Indented));
-
-        await ExcelWriter.Save(prdData, uatData, RAW_PATH);
+            for (int row = 0; row < flattened.Count; row++)
+            {
+                for (int col = 0; col < headers.Count; col++)
+                {
+                    flattened[row].TryGetValue(headers[col], out var value);
+                    sheet.Cells[row + 2, col + 1].Value = value;
+                }
+            }
+        }
     }
 }
