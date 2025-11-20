@@ -11,7 +11,7 @@ namespace TenantExtractor.Services
 {
     public static class CsvWriter
     {
-        // ✅ For TenantRecord flattening (used by TenantFetcher)
+        // For TenantRecord flattening (used by TenantFetcher)
         public static void SaveCsv(List<TenantRecord> data, string outputPath)
         {
             var flattened = data.Select(TenantFlattener.Flatten).ToList();
@@ -23,13 +23,10 @@ namespace TenantExtractor.Services
             }
 
             var headers = flattened.SelectMany(d => d.Keys).Distinct().ToList();
-
             var sb = new StringBuilder();
 
-            // Header
             sb.AppendLine(string.Join(",", headers));
 
-            // Rows
             foreach (var row in flattened)
             {
                 var values = headers.Select(h => EscapeCsv(row.ContainsKey(h) ? row[h] : ""));
@@ -39,7 +36,7 @@ namespace TenantExtractor.Services
             File.WriteAllText(outputPath, sb.ToString());
         }
 
-        // ✅ For Swagger Metadata output (generic dictionaries)
+        // For Swagger Metadata output (generic dictionaries)
         public static void WriteDictionaries(string outputPath, List<Dictionary<string, string>> rows)
         {
             if (!rows.Any())
