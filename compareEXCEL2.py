@@ -1,47 +1,71 @@
 import pandas as pd
 from pathlib import Path
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows
 
-# ✅ Setup paths
+# === STEP 1: Setup paths ===
 base_path = Path(__file__).resolve().parent.parent
 input_folder = base_path / "shared" / "input" / "ExcelCompare"
-output_file = input_folder / "RowLevelDifferences.xlsx"
+output_file = input_folder / "PRD_UAT_PositionID_Comparison.xlsx"
 
-file1 = input_folder / "PRD.xlsm"
-file2 = input_folder / "UAT.xlsm"
+file_prd = input_folder / "PRD.xlsm"
+file_uat = input_folder / "UAT.xlsm"
 
-# ✅ Check file existence
-if not file1.exists():
-    raise FileNotFoundError(f"Missing file: {file1}")
-if not file2.exists():
-    raise FileNotFoundError(f"Missing file: {file2}")
+# === STEP 2: Load data ===
+df_prd = pd.read_excel(file_prd, engine="openpyxl")
+df_uat = pd.read_excel(file_uat, engine="openpyxl")
 
-# ✅ Load .xlsm files
-df_prd = pd.read_excel(file1, engine="openpyxl")
-df_uat = pd.read_excel(file2, engine="openpyxl")
-
-# ✅ Strip column whitespace
 df_prd.columns = df_prd.columns.str.strip()
 df_uat.columns = df_uat.columns.str.strip()
 
-# ✅ Check columns match
-if set(df_prd.columns) != set(df_uat.columns):
-    raise ValueError("❌ Column mismatch between PRD and UAT files")
+# === STEP 3: Check for PositionID key ===
+if "PositionID" not in df_prd.columns or "PositionID" not in df_uat.columns:
+    raise KeyError("❌ 'PositionID' column is missing in one of the files.")
 
-# ✅ Align column order
-df_uat = df_uat[df_prd.columns]
+# === STEP 4: Set PositionID as index and align both ===
+df_prd = df_prd.set_index("PositionID").sort_index()
+df_uat = df_uat.set_index("PositionID").sort_index()
 
-# ✅ Sort columns to normalize (column order doesn't affect comparison)
-df_prd_sorted = df_prd[df_prd.columns.sort_values()]
-df_uat_sorted = df_uat[df_uat.columns.sort_values()]
+# Align both DataFrames on PositionID (inner join)
+common_ids = df_prd.index.intersection(df_uat.index)
+df_prd_common = df_prd.loc[common_ids]
+df_uat_common = df_uat.loc[common_ids]
 
-# ✅ Add SOURCE TAG for diff tracking
-df_prd_sorted["DIFFERENCE_TYPE"] = "ONLY_IN_PRD"
-df_uat_sorted["DIFFERENCE_TYPE"] = "ONLY_IN_UAT"
+# === STEP 5: Create Excel with highlighting ===
+wb = Workbook()
+ws_prd = wb.active
+ws_prd.title = "PRD"
+ws_uat = wb.create_sheet("UAT")
 
-# ✅ Combine and drop duplicate rows (those that are equal)
-combined_df = pd.concat([df_prd_sorted, df_uat_sorted], ignore_index=True)
-difference_df = combined_df.drop_duplicates(subset=df_prd.columns.tolist(), keep=False)
+# Reset index for writing to Excel
+df_prd_common_reset = df_prd_common.reset_index()
+df_uat_common_reset = df_uat_common.reset_index()
 
-# ✅ Save result
-difference_df.to_excel(output_file, index=False)
-print(f"✅ Row-level differences saved to: {output_file}")
+# Write PRD sheet
+for row in dataframe_to_rows(df_prd_common_reset, index=False, header=True):
+    ws_prd.append(row)
+
+# Write UAT sheet
+for row in dataframe_to_rows(df_uat_common_reset, index=False, header=True):
+    ws_uat.append(row)
+
+# === STEP 6: Highlight mismatches ===
+highlight_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
+num_rows = len(df_prd_common_reset)
+num_cols = len(df_prd_common_reset.columns)
+
+# Compare each cell (skip header = row 1)
+for row in range(2, num_rows + 2):  # Excel rows start at 1
+    for col in range(1, num_cols + 1):
+        val_prd = ws_prd.cell(row=row, column=col).value
+        val_uat = ws_uat.cell(row=row, column=col).value
+
+        if val_prd != val_uat:
+            ws_prd.cell(row=row, column=col).fill = highlight_fill
+            ws_uat.cell(row=row, column=col).fill = highlight_fill
+
+# === STEP 7: Save result ===
+wb.save(output_file)
+print(f"✅ Highlighted comparison saved: {output_file}")
