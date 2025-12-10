@@ -1,34 +1,50 @@
+import urllib.parse
 from pymongo import MongoClient
-import ssl
+import os
 
-# HARDCODE YOUR DETAILS HERE FOR TESTING
-TEST_HOST = "192.168.1.50"  # Replace with your actual Mongo Host IP
-TEST_PORT = 27017           # Replace with actual Port
-TEST_USER = "myUser"        # Replace with actual Username
-TEST_PASS = "myPassword"    # Replace with actual Password
-TEST_DB   = "admin"         # The DB where the user was created (usually 'admin')
+# 1. ENTER YOUR RAW CREDENTIALS HERE (Exactly as they are in Studio 3T)
+#    (Do not manually replace @ with %40 here. Put the REAL password)
+RAW_USERNAME = "myUser"       # Replace this
+RAW_PASSWORD = "my@Password!" # Replace this (e.g., if it has @ or :)
+HOST = "192.168.1.50"         # Replace this
+PORT = 27017                  # Replace this
+AUTH_DB = "admin"             # Usually 'admin'
 
-print(f"--- Attempting Connection to {TEST_HOST} ---")
+print("--- Step 1: Escaping Credentials ---")
 
-# 1. Construct URI
-uri = f"mongodb://{TEST_USER}:{TEST_PASS}@{TEST_HOST}:{TEST_PORT}/?authSource={TEST_DB}"
+# 2. ESCAPE CREDENTIALS (The RFC 3986 Fix)
+# This converts 'apple@123' -> 'apple%40123' automatically
+username_safe = urllib.parse.quote_plus(RAW_USERNAME)
+password_safe = urllib.parse.quote_plus(RAW_PASSWORD)
+
+print(f"Original Password: {RAW_PASSWORD}")
+print(f"Escaped Password:  {password_safe}")  # You should see % symbols here now
+
+# 3. CONSTRUCT URI
+# Notice we use the *_safe versions here
+uri = f"mongodb://{username_safe}:{password_safe}@{HOST}:{PORT}/?authSource={AUTH_DB}"
+
+print(f"\n--- Step 2: Connecting to {HOST} ---")
+print(f"URI (masked): mongodb://{username_safe}:****@{HOST}:{PORT}/...")
 
 try:
-    # 2. Try Basic Connection
-    print("Attempt 1: Standard Connection...")
-    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-    print(client.server_info())
-    print("SUCCESS: Standard Connection worked!")
+    # 4. ATTEMPT CONNECTION
+    # tls=True is usually required for Enterprise Mongo
+    client = MongoClient(uri, serverSelectionTimeoutMS=5000, tls=True, tlsAllowInvalidCertificates=True)
+    
+    # Force a network call
+    info = client.server_info()
+    print("\n✅ SUCCESS! Connected successfully.")
+    print(f"Server Version: {info.get('version')}")
 
 except Exception as e:
-    print(f"FAILED: {e}")
+    print("\n❌ FAILURE")
+    print("Error Details:")
+    print(e)
     
-    # 3. Try Enterprise SSL Connection (Most likely the fix)
-    print("\nAttempt 2: Trying with SSL/TLS...")
-    try:
-        # allowInvalidCertificates=True is often needed for internal banking certificates
-        client = MongoClient(uri, serverSelectionTimeoutMS=5000, tls=True, tlsAllowInvalidCertificates=True)
-        print(client.server_info())
-        print("SUCCESS: SSL Connection worked!")
-    except Exception as e2:
-        print(f"FAILED SSL Attempt: {e2}")
+    print("\n--- Troubleshooting Tips ---")
+    if "SSL" in str(e):
+        print("1. Try setting tls=False in the MongoClient line above.")
+    elif "Authentication failed" in str(e):
+        print("1. Check if AUTH_DB is 'admin' or something else (like your specific database name).")
+        print("2. Verify the username/password again in Studio 3T.")
