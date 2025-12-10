@@ -1,184 +1,184 @@
-from urllib.parse import quote_plus
-import ast
-import pandas as pd
-from pymongo import MongoClient
-from datetime import datetime
-from dotenv import load_dotenv
 import os
-import urllib.parse
-from bson import json_util
-import copy  # <--- Added this import for the fix
+import pyodbc
+import pandas as pd
+import requests
+from requests_ntlm import HttpNtlmAuth
+import xml.etree.ElementTree as ET
+from dotenv import load_dotenv
+from auth import get_password
+import subprocess
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load environment variables
 load_dotenv()
-MONGO_USERNAME = os.getenv("MONGOUSERNAME")
-MONGO_PASSWORD = os.getenv("MONGOPASSWORD")
-encoded_user = urllib.parse.quote_plus(MONGO_USERNAME)
-encoded_pass = urllib.parse.quote_plus(MONGO_PASSWORD)
+USERNAME = os.getenv("USERNAME")
+PASSWORD = get_password()
 
-# Input and Output Paths
-input_file = r"./shared/input/pegasus_mongo_validation_input.xlsx"
-sheet_name = "MongoValidationInput"
-output_file = "./shared/reports/mongo_dynamic_validation_report.xlsx"
+# Input/Output files
+input_file = "shared/input/ExtractBookReffFromCDWurl_ValidateBookInDB_Input.xlsx"
+sheet_name = "TradesInFile_BookRefInDB"
+output_file = "shared/reports/ExtractBookReffFromCDWurl_ValidateInDB_report.xlsx"
 
-# Read Excel
-df = pd.read_excel(input_file, sheet_name=sheet_name)
-validation_results = []
-
-# Process Each Row
-for index, row in df.iterrows():
-    mongo_host = row.get("MongoHost")
-    mongo_port = row.get("MongoPort")
-    db_name = row.get("DatabaseName")
-    collection_name = row.get("CollectionName")
-
-    print(f"Processing row {index+1}: {db_name}.{collection_name} on {mongo_host}:{mongo_port}")
-
-    # Connect to MongoDB
+def fetch_cdw_response(cdwurl):
     try:
-        # Use +srv if required, or standard connection string
-        mongo_uri = f"mongodb+srv://{encoded_user}:{encoded_pass}@{mongo_host}"
-        # Alternative: mongo_uri = f"mongodb://{encoded_user}:{encoded_pass}@{mongo_host}:{mongo_port}/"
-        
-        client = MongoClient(mongo_uri)
-        db = client[db_name]
-        collection = db[collection_name]
+        # Note: Using subprocess with curl as per original image, though requests library is imported
+        command = ['curl', '-u', f'{USERNAME}:{PASSWORD}', '-H', 'Accept: application/xml', '-H', 'Content-Type:application/xml', cdwurl]
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        if result.returncode == 0:
+            print(f"[DEBUG] curl output fetched successfully")
+            return result.stdout
+        else:
+            print(f"[DEBUG] curl failed with return code {result.returncode}")
+            return None
     except Exception as e:
-        print(f"Connection error: {e}")
-        continue
+        print(f"Exception occured: {e}")
+        return None
 
-    # Build query dynamically
-    query_conditions = []
-    col_names = df.columns.tolist()
+def validate_book_in_db(server, db, table, column, book_ref):
+    conn_str = (
+        f"DRIVER={{SQL Server}};"
+        f"SERVER={server};"
+        f"DATABASE={db};"
+        f"Trusted_Connection=yes;"
+    )
+    try:
+        conn = pyodbc.connect(conn_str, timeout=10)
+        cursor = conn.cursor()
+        
+        # FIX: Trim whitespace from the DB column to ensure accurate matching
+        # Old query: SELECT DISTINCT {column} FROM {db}.{table} WHERE {column} = ?
+        query = f"SELECT DISTINCT {column} FROM {db}.{table} WHERE LTRIM(RTRIM({column})) = ?"
+        
+        cursor.execute(query, (book_ref,))
+        
+        # Check if any row is returned
+        return "FOUND" if cursor.fetchone() else "MISSING"
+        
+    except Exception as e:
+        return f"Exception: {e}"
 
-    for i in range(1, 50):
-        field_col = f"Field{i}"
-        op_col = f"Operator{i}"
-        val_col = f"Value{i}"
-
-        if field_col in col_names and op_col in col_names and val_col in col_names:
-            field = str(row.get(field_col)).strip()
-            operator = str(row.get(op_col)).strip().lower()
-            val_raw = row.get(val_col)
+def extract_book_from_cdw(xml_data):
+    try:
+        root = ET.fromstring(xml_data)
+        ns = {'fpml': 'http://www.fpml.org/FpML-5/reporting'}
+        accounts = root.findall(".//fpml:account[@id='HOUSE-ACCOUNT']", namespaces=ns)
+        if accounts:
+            account_node = accounts[-1]
+            book_ref_node = account_node.find(".//fpml:accountId[@accountIdScheme='mhi:book-ref']", namespaces=ns)
+            book_type_node = account_node.find(".//fpml:accountId[@accountIdScheme='mhi:book-type']", namespaces=ns)
             
-            if pd.isna(field) or pd.isna(operator) or pd.isna(val_raw):
-                continue
+            if book_ref_node is not None and book_type_node is not None:
+                # Strip text immediately to avoid whitespace issues
+                return book_ref_node.text.strip(), book_type_node.text.strip(), None
+            else:
+                return None, None, "Missing book-ref or book-type in account node"
+        else:
+            return None, None, "HOUSE-ACCOUNT node not found"
+    except ET.ParseError as e:
+        return None, None, f"XML ParseError: {str(e)}"
+    except Exception as e:
+        return None, None, f"XML Error: {str(e)}"
 
-            # Parse ISODate or normal value
-            try:
-                if isinstance(val_raw, str) and val_raw.startswith("ISODate"):
-                    iso_str = val_raw.replace("ISODate(", "").rstrip(")").strip("'").strip('"')
-                    val = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-                else:
-                    val = ast.literal_eval(str(val_raw))
-            except:
-                val = str(val_raw)
+def process_trades():
+    df = pd.read_excel(input_file, sheet_name=sheet_name)
+    results = []
+
+    for _, row in df.iterrows():
+        dest_folder = str(row.get("DESTINATIONFOLDER", "")).strip()
+        print(f"dest_folder={dest_folder}")
+        file_type = str(row.get("FILETYPE", "")).strip().upper()
+        filename = str(row.get("FILENAME", "")).strip()
+        print(f"filename = {filename}")
+        filepath = os.path.join(dest_folder, filename)
+        print(f"filepath={filepath}")
+        
+        trades_str = str(row.get("TRADES", "")).strip()
+        trade_ids = [t.strip() for t in trades_str.split(",") if t.strip()]
+        
+        cdw_base_url = str(row.get("CDWURL_BASEURL", "")).strip()
+        cdwurl_filler = str(row.get("CDWURL_FILLER", "")).strip()
+        reporting_date = str(row.get("CDWURL_BATCHDATE", "")).strip()
+        
+        server = str(row.get("DatabaseServerName", "")).strip()
+        db = str(row.get("DatabaseName", "")).strip()
+        table = str(row.get("TableName", "")).strip()
+        column = str(row.get("ColumnNameForBookRef", "")).strip()
+
+        for trade_id in trade_ids:
+            trade_found = "MISSING"
+            book_ref_in_cdw = "-"
+            book_db_result = "Not Checked"  # Default value for new column
             
-            # Build condition
-            condition = {}
-            if operator == "eq":
-                condition = {field: val}
-            elif operator == "ne":
-                condition = {field: {"$ne": val}}
-            elif operator == "in":
-                if isinstance(val, str):
-                    val = [v.strip() for v in val.split(",")]
-                condition = {field: {"$in": val}}
-            elif operator == "nin":
-                if isinstance(val, str):
-                    val = [v.strip() for v in val.split(",")]
-                condition = {field: {"$nin": val}}
-            elif operator == "gt":
-                condition = {field: {"$gt": val}}
-            elif operator == "gte":
-                condition = {field: {"$gte": val}}
-            elif operator == "lt":
-                condition = {field: {"$lt": val}}
-            elif operator == "lte":
-                condition = {field: {"$lte": val}}
-            else:
-                print(f"Unsupported operator '{operator}' - skipping.")
-                continue
-
-            query_conditions.append(condition)
-
-    if not query_conditions:
-        print("No valid conditions found - skipping row.")
-        continue
-
-    # Initial Combined Query (before splitting $in)
-    mongo_query = {"$and": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
-    print(f"Initial mongo_query : {mongo_query}")
-
-    # Check for $in operator to split validation per item
-    in_fields = [q for q in query_conditions if isinstance(q, dict) and list(q.values())[0] and isinstance(list(q.values())[0], dict) and "$in" in list(q.values())[0]]
-
-    if in_fields:
-        in_field = list(in_fields[0].keys())[0]
-        trade_list = list(in_fields[0].values())[0]["$in"]
-
-        # Build base query excluding the $in field
-        base_conditions = [q for q in query_conditions if in_field not in q]
-        base_query = {"$and": base_conditions} if base_conditions else {}
-
-        for trade in trade_list:
-            # FIX: Use deepcopy to prevent list mutation across iterations
-            per_trade_query = copy.deepcopy(base_query)
-
-            if "$and" in per_trade_query:
-                per_trade_query["$and"].append({in_field: trade})
-            else:
-                # If base_query was empty or simple, we need to handle it carefully
-                if not per_trade_query:
-                     per_trade_query = {in_field: trade}
-                else:
-                    per_trade_query[in_field] = trade
+            cdw_url = f"{cdw_base_url}/{trade_id}{cdwurl_filler}{reporting_date}"
+            query_used = f"-- CDW URL: {cdw_url}"
+            comments = ""
 
             try:
-                found = collection.count_documents(per_trade_query) > 0
-                print(f"trade : {trade} - Status : {found}")
+                # STEP 1: Search in MBE_POSITION_SET file
+                # Using engine='python' for more robust parsing as per original code
+                file_df = pd.read_csv(filepath, delimiter="|", dtype=str, engine="python")
                 
-                validation_results.append({
-                    "Database": db_name,
-                    "Collection": collection_name,
-                    "QueryField": in_field,
-                    "TradeValue": trade,
-                    "Query": str(per_trade_query),
-                    "Status": "FOUND" if found else "MISSING"
-                })
+                # Clean up dataframe columns (strip whitespace)
+                file_df = file_df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+                # Ensure specific columns are treated as strings and stripped
+                if "M_ORIGIN_RE" in file_df.columns:
+                    file_df["M_ORIGIN_RE"] = file_df["M_ORIGIN_RE"].astype(str).str.strip()
+                if "BOOK_ID" in file_df.columns:
+                    file_df["BOOK_ID"] = file_df["BOOK_ID"].astype(str).str.strip()
+
+                match_row = file_df[file_df["M_ORIGIN_RE"] == trade_id]
+                
+                if not match_row.empty:
+                    trade_found = "FOUND"
+                    # file_book_ref logic existed in original, but wasn't used further in logic shown
+                    file_book_ref = match_row["BOOK_ID"].values[0].strip()
+
+                    # STEP 2: Fetch from CDW
+                    xml_data = fetch_cdw_response(cdw_url)
+                    if xml_data:
+                        book_ref, book_type, err = extract_book_from_cdw(xml_data)
+                        
+                        if book_ref and book_type:
+                            book_ref_in_cdw = f"{book_ref} {book_type}"
+                            book_ref_in_db = f"{book_ref} {book_type}"
+                            
+                            # Logging the query string for the report (visual only)
+                            query_used = f"SELECT DISTINCT {column} FROM {db}.{table} WHERE {column} IN ('{book_ref_in_db}')"
+                            
+                            # STEP 3: DB Validation
+                            book_db_result = validate_book_in_db(server, db, table, column, book_ref_in_db)
+                            comments = f"{book_ref_in_cdw} | BookRef DB Check: {book_db_result}"
+                        else:
+                            comments = err or "BookRef not extracted"
+                            query_used += " -- Missing book-ref/book-type"
+                    else:
+                        comments = "CDW fetch failed or empty response"
+                        query_used += " -- CDW fetch failed"
+                else:
+                    comments = "TradeID not found in MBE_POSITION_SET file"
+                    query_used += " -- M_ORIGIN_RE not found"
+
             except Exception as e:
-                validation_results.append({
-                    "Database": db_name,
-                    "Collection": collection_name,
-                    "QueryField": in_field,
-                    "TradeValue": trade,
-                    "Query": str(per_trade_query),
-                    "Status": f"ERROR: {e}"
-                })
-    else:
-        # Standard query without splitting $in
-        try:
-            found = collection.count_documents(mongo_query) > 0
-            validation_results.append({
-                "Database": db_name,
-                "Collection": collection_name,
-                "QueryField": "N/A",
-                "TradeValue": "N/A",
-                "Query": str(mongo_query),
-                "Status": "FOUND" if found else "MISSING"
-            })
-        except Exception as e:
-            validation_results.append({
-                "Database": db_name,
-                "Collection": collection_name,
-                "QueryField": "N/A",
-                "TradeValue": "N/A",
-                "Query": str(mongo_query),
-                "Status": f"ERROR: {e}"
+                comments = f"Exception occurred: {str(e)}"
+                query_used += " -- Exception during validation"
+
+            # Append results including the NEW COLUMN
+            results.append({
+                "FileType": file_type,
+                "Filename": filepath,
+                "TradeID": trade_id,
+                "TradeFound": trade_found,
+                "CDWURL": cdw_url,
+                "BOOKREF_INCDW": book_ref_in_cdw,
+                "BOOKFOUND": book_db_result,  # <--- NEW COLUMN ADDED HERE
+                "Query_Used": query_used,
+                "Comments": comments
             })
 
-# Final Export
-df_out = pd.DataFrame(validation_results)
-df_out["RunTimestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-df_out.to_excel(output_file, index=False)
-print(f"Report generated -> {output_file}")
+    # Save output
+    pd.DataFrame(results).to_excel(output_file, index=False)
+    print(f"Report generated: {output_file}")
+
+if __name__ == "__main__":
+    process_trades()
