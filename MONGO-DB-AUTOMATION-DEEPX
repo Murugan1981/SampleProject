@@ -1,0 +1,178 @@
+import os
+import logging
+import pandas as pd
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ConfigurationError, ServerSelectionTimeoutError
+from dotenv import load_dotenv
+from urllib.parse import quote_plus
+
+# 1. SETUP & CONFIGURATION
+# ---------------------------------------------------------
+load_dotenv()  # Load environment variables securely
+
+# Configure Logging (Crucial for audit trails in banking)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("mongo_test_execution.log"),
+        logging.StreamHandler()
+    ]
+)
+
+# Map Excel operators to MongoDB operators
+OPERATOR_MAP = {
+    '=': '$eq',
+    '!=': '$ne',
+    '>': '$gt',
+    '>=': '$gte',
+    '<': '$lt',
+    '<=': '$lte',
+    'in': '$in',
+    'exists': '$exists'
+}
+
+def get_mongo_client(host, port, username=None, password=None):
+    """
+    Creates a secure MongoDB connection.
+    Handles authentication and connection timeouts.
+    """
+    try:
+        if username and password:
+            # URL encode credentials to handle special characters in passwords
+            user = quote_plus(username)
+            pwd = quote_plus(password)
+            uri = f"mongodb://{user}:{pwd}@{host}:{port}/?authSource=admin"
+        else:
+            uri = f"mongodb://{host}:{port}/"
+        
+        # Enterprise Grade: Set a strict timeout (e.g., 5 seconds) to avoid hanging
+        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        client.server_info() # Force a call to check connectivity
+        return client
+    except (ConnectionFailure, ConfigurationError, ServerSelectionTimeoutError) as e:
+        logging.error(f"Connection Failed to {host}: {e}")
+        return None
+
+def cast_value(value):
+    """
+    Helper to fix Excel data types. 
+    Excel reads everything as strings/floats; MongoDB might need Ints or Bools.
+    """
+    if str(value).lower() == 'true': return True
+    if str(value).lower() == 'false': return False
+    try:
+        # Try converting to integer if it's a whole number
+        if float(value).is_integer():
+            return int(value)
+        return float(value)
+    except (ValueError, TypeError):
+        return value # Return as string if it's not a number
+
+def build_dynamic_query(row):
+    """
+    Iterates through row columns to find Field/Op/Value groups 
+    and builds a Mongo query dictionary.
+    """
+    query = {}
+    
+    # We assume columns are named Field1, Op1, Val1, Field2, Op2, Val2...
+    # We loop up to a reasonable max (e.g., 5 conditions)
+    for i in range(1, 6): 
+        field_col = f"Field{i}"
+        op_col = f"Op{i}"
+        val_col = f"Val{i}"
+        
+        # Check if the columns exist in the Excel and are not empty
+        if field_col in row and pd.notna(row[field_col]):
+            field = row[field_col]
+            operator_raw = row[op_col]
+            value = cast_value(row[val_col])
+            
+            mongo_op = OPERATOR_MAP.get(str(operator_raw).strip(), '$eq')
+            
+            # Construct the query fragment
+            if mongo_op == '$eq':
+                query[field] = value
+            else:
+                if field in query:
+                    query[field].update({mongo_op: value})
+                else:
+                    query[field] = {mongo_op: value}
+                    
+    return query
+
+# 2. MAIN EXECUTION FLOW
+# ---------------------------------------------------------
+def run_tests(input_file, output_file):
+    logging.info(f"Starting Test Run on: {input_file}")
+    
+    try:
+        df = pd.read_excel(input_file)
+    except Exception as e:
+        logging.critical(f"Could not read Excel file: {e}")
+        return
+
+    # Add Status columns if they don't exist
+    df['Actual_Count'] = 0
+    df['Test_Status'] = 'Pending'
+    df['Error_Log'] = ''
+
+    # Get credentials from .env
+    env_user = os.getenv("MONGO_USER")
+    env_pass = os.getenv("MONGO_PASS")
+
+    for index, row in df.iterrows():
+        host = row.get('Host')
+        # Default to 27017 if port is missing or NaN
+        port = int(row.get('Port')) if pd.notna(row.get('Port')) else 27017
+        db_name = row.get('Database')
+        coll_name = row.get('Collection')
+        
+        logging.info(f"Processing Row {index + 1}: {db_name}.{coll_name}")
+
+        client = get_mongo_client(host, port, env_user, env_pass)
+        
+        if not client:
+            df.at[index, 'Test_Status'] = 'Connection Error'
+            df.at[index, 'Error_Log'] = 'Could not connect to Host'
+            continue
+
+        try:
+            db = client[db_name]
+            collection = db[coll_name]
+            
+            # Dynamic Query Construction
+            query = build_dynamic_query(row)
+            logging.info(f"Query Generated: {query}")
+            
+            # Execute Query (Count is safer/faster for testing existence than fetching data)
+            count = collection.count_documents(query)
+            
+            df.at[index, 'Actual_Count'] = count
+            
+            # VALIDATION LOGIC
+            # If expected result is "Exist", count must be > 0
+            if count > 0:
+                df.at[index, 'Test_Status'] = 'PASS'
+            else:
+                df.at[index, 'Test_Status'] = 'FAIL'
+                df.at[index, 'Error_Log'] = f"No documents found for {query}"
+
+        except Exception as e:
+            df.at[index, 'Test_Status'] = 'Error'
+            df.at[index, 'Error_Log'] = str(e)
+            logging.error(f"Error on row {index}: {e}")
+        
+        finally:
+            client.close()
+
+    # 3. REPORTING
+    # ---------------------------------------------------------
+    df.to_excel(output_file, index=False)
+    logging.info(f"Testing Complete. Report saved to {output_file}")
+
+# Usage
+if __name__ == "__main__":
+    # Ensure you have 'test_cases.xlsx' in the same folder
+    run_tests('test_cases.xlsx', 'test_results.xlsx')
