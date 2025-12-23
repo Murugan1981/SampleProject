@@ -1,111 +1,105 @@
 import os
 import pandas as pd
+import shutil
 from datetime import datetime
-import csv
 
-# Inputs
+# Input and output paths
 input_file = "shared/input/SensitivityInput_Filenames.xlsx"
 sheet_name = "FilesInFolder"
-output_file = "shared/reports/csv_column_and_row_report.xlsx"
+output_file = "shared/reports/sensitivity_file_report.xlsx"
 
-# Load input sheet
+# Load Excel input
 df_input = pd.read_excel(input_file, sheet_name=sheet_name)
 
-# Validate required columns
-required_cols = {"Validate?", "FullFileName", "BaseFileName", "DestinationFolder"}
+required_cols = {"Validate?", "FullFileName", "BaseFileName", "DestinationFolder", "LocalFolder"}
 if not required_cols.issubset(df_input.columns):
-    raise ValueError(f"Missing required columns: {required_cols}")
+    raise ValueError(f"Missing columns in input: {required_cols}")
 
-# Output holders
-column_rows = []   # for Sheet1
-rowcount_rows = [] # for Sheet2
+columns_report = []
+rowcount_report = []
 
-def detect_delimiter(filepath, sample_size=5):
-    with open(filepath, 'r', encoding='utf-8') as f:
-        sample = ''.join([next(f) for _ in range(sample_size)])
-        sniffer = csv.Sniffer()
-        try:
-            return sniffer.sniff(sample).delimiter
-        except:
-            return ','  # default fallback
-
-# Loop through input rows
 for _, row in df_input.iterrows():
-    base_file = str(row["BaseFileName"]).strip()
-    full_file = str(row["FullFileName"]).strip()
     validate_flag = str(row["Validate?"]).strip().upper()
-    dest_folder = str(row["DestinationFolder"]).strip()
+    full_file = str(row["FullFileName"]).strip()
+    base_file = str(row["BaseFileName"]).strip()
+    shared_folder = str(row["DestinationFolder"]).strip()
+    local_folder = str(row["LocalFolder"]).strip()
 
-    if validate_flag != "YES" or not os.path.exists(dest_folder):
-        continue
+    result = "MISSING"
+    comment = ""
+    matched_filename = None
 
-    files_in_folder = os.listdir(dest_folder)
-    matched_file = None
-
-    if full_file in files_in_folder:
-        matched_file = full_file
+    if validate_flag != "YES" or not os.path.exists(shared_folder):
+        comment = "Folder missing or validation skipped"
     else:
-        similar_files = [f for f in files_in_folder if base_file in f]
-        if similar_files:
-            matched_file = sorted(
-                similar_files,
-                key=lambda x: os.path.getmtime(os.path.join(dest_folder, x)),
-                reverse=True
-            )[0]
+        all_files = os.listdir(shared_folder)
 
-    if not matched_file:
-        continue
+        # Step 1: Look for exact match (file startswith full_file)
+        exact_matches = [f for f in all_files if f.startswith(full_file)]
 
-    file_path = os.path.join(dest_folder, matched_file)
+        if exact_matches:
+            # Copy the most recent file
+            most_recent = sorted(exact_matches, key=lambda x: os.path.getmtime(os.path.join(shared_folder, x)), reverse=True)[0]
+            src_path = os.path.join(shared_folder, most_recent)
+            dst_path = os.path.join(local_folder, most_recent)
+            try:
+                os.makedirs(local_folder, exist_ok=True)
+                shutil.copy2(src_path, dst_path)
+                result = "FOUND"
+                matched_filename = most_recent
+                comment = ", ".join(exact_matches)
+            except Exception as e:
+                result = "COPY_FAILED"
+                comment = str(e)
+        else:
+            # Step 2: Try partial match on base file
+            partial_matches = [f for f in all_files if base_file in f and f.startswith(base_file)]
+            if partial_matches:
+                result = "MISSING"
+                comment = f"Partial match: {', '.join(partial_matches)}"
+            else:
+                result = "MISSING"
+                comment = "No matching file found"
 
-    try:
-        # Detect delimiter
-        delimiter = detect_delimiter(file_path)
-
-        # Get column names
-        with open(file_path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter=delimiter)
-            header = next(reader)
-
-        for col in header:
-            column_rows.append({
-                "FileName": matched_file,
-                "ColumnName": col
+    # Sheet 1: Column names
+    if result == "FOUND" and matched_filename:
+        try:
+            full_path = os.path.join(local_folder, matched_filename)
+            delimiter = "|" if full_path.endswith(".csv") else ","
+            df = pd.read_csv(full_path, delimiter=delimiter, dtype=str, engine='python', nrows=1)
+            for col in df.columns:
+                columns_report.append({
+                    "FileName": matched_filename,
+                    "ColumnName": col,
+                    "SourceFile": full_path
+                })
+        except Exception as e:
+            columns_report.append({
+                "FileName": matched_filename or full_file,
+                "ColumnName": "ERROR",
+                "SourceFile": f"Read error: {str(e)}"
             })
 
-        # Count actual rows (excluding header and comment)
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        last_line = lines[-1].strip()
-        if last_line.startswith("#"):
-            reported = int(last_line[1:])
-            actual = len(lines) - 2  # minus header and comment
-        else:
-            reported = "NotFound"
-            actual = len(lines) - 1  # minus header only
-
-        match = "Match" if str(reported) == str(actual) else "Mismatch"
-
-        rowcount_rows.append({
-            "FileName": matched_file,
-            "ReportedRowCount": reported,
-            "ActualRowCount": actual,
-            "MatchStatus": match
-        })
-
+    # Sheet 2: Row count
+    row_count = 0
+    try:
+        if result == "FOUND" and matched_filename:
+            df_data = pd.read_csv(full_path, delimiter=delimiter, dtype=str, engine='python')
+            row_count = len(df_data)
     except Exception as e:
-        rowcount_rows.append({
-            "FileName": matched_file,
-            "ReportedRowCount": "ERROR",
-            "ActualRowCount": "ERROR",
-            "MatchStatus": str(e)
-        })
+        comment += f" | Row read error: {str(e)}"
 
-# Export to Excel with two sheets
-os.makedirs(os.path.dirname(output_file), exist_ok=True)
-with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-    pd.DataFrame(column_rows).to_excel(writer, index=False, sheet_name="Sheet1_Columns")
-    pd.DataFrame(rowcount_rows).to_excel(writer, index=False, sheet_name="Sheet2_RowCounts")
+    rowcount_report.append({
+        "FullFileName": full_file,
+        "Result": result,
+        "CopiedFile": matched_filename or "-",
+        "Comment": comment,
+        "RowCount": row_count
+    })
 
-print(f"✅ Done. Output saved to: {output_file}")
+# Write to Excel
+with pd.ExcelWriter(output_file) as writer:
+    pd.DataFrame(columns_report).to_excel(writer, sheet_name="SensiFile_columns", index=False)
+    pd.DataFrame(rowcount_report).to_excel(writer, sheet_name="SensiFile_RowCount", index=False)
+
+print(f"✅ Output generated: {output_file}")
