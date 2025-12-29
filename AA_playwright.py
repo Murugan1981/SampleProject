@@ -5,22 +5,20 @@ import pandas as pd
 # ================= CONFIGURATION =================
 # Replace with your actual URL
 SAMPLE_URL = "https://petstore.swagger.io/" 
-EXCEL_FILE = "get_endpoints_values.xlsx"
+EXCEL_FILE = "swagger_report_dynamic_columns.xlsx"
 
-# 1. Select the main block for GET requests
+# Selectors
 GET_BLOCK_XPATH = '//div[contains(@class,"opblock") and contains(@class,"opblock-get")]'
-
-# 2. Select the Summary/Header (Changed to generic class to match your DIV)
 EXPAND_BTN_CSS = '.opblock-summary'
-
-# 3. Select the Path/Endpoint Name
 GET_SUMMARY_XPATH = './/span[contains(@class,"opblock-summary-path")]'
 
-# 4. Select the Available Values container (from your earlier snippet)
-ENUM_CONTAINER_CSS = '.parameter__enum' 
+# New Selectors for Table Rows
+PARAM_ROW_CSS = 'tr' 
+PARAM_NAME_CSS = '.parameter__name'
+PARAM_ENUM_CSS = '.parameter__enum'
 # =================================================
 
-async def extract_get_endpoints_and_values(url):
+async def extract_swagger_data(url):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         context = await browser.new_context()
@@ -34,7 +32,7 @@ async def extract_get_endpoints_and_values(url):
         get_blocks = await page.locator(f'xpath={GET_BLOCK_XPATH}').all()
         print(f"Found {len(get_blocks)} GET endpoints.")
 
-        result_rows = []
+        all_endpoints_data = []
 
         for i, get_block in enumerate(get_blocks):
             # --- 1. Get Endpoint Name ---
@@ -45,81 +43,90 @@ async def extract_get_endpoints_and_values(url):
             
             print(f"\n[{i+1}/{len(get_blocks)}] Processing: {endpoint_path}")
 
+            # Initialize the dictionary for this row with the Endpoint name
+            # This dict will grow dynamically (e.g., adding 'tradingEntity', 'reportingDate' keys)
+            current_row_data = {"Endpoint": endpoint_path}
+
             # --- 2. Force Expand ---
-            # We target the '.opblock-summary' div directly.
             expand_target = get_block.locator(EXPAND_BTN_CSS)
-            
-            # Check if already expanded by looking for the body section
-            # (The body usually has class 'opblock-body')
             is_expanded = await get_block.locator('.opblock-body').count() > 0
 
             if not is_expanded:
                 try:
                     if await expand_target.count() > 0:
-                        # Scroll to it to ensure clicks work
                         await expand_target.scroll_into_view_if_needed()
                         await expand_target.click(timeout=2000)
-                        # print("  -> Clicked expand.")
                         
-                        # CRITICAL: Wait for the body to actually render
+                        # Wait for the parameters table to be visible
                         try:
                             await get_block.locator('.opblock-body').wait_for(state="visible", timeout=2000)
                         except:
-                            pass # Proceed anyway, sometimes animation is slow
-                    else:
-                        print("  -> Expand target not found.")
-                except Exception as ex:
-                    print(f"  -> Click failed: {ex}")
-            else:
-                pass
-                # print("  -> Already expanded.")
+                            pass 
+                except Exception:
+                    pass
 
-            # --- 3. Extract Values ---
-            all_values_found = []
-            
+            # --- 3. Extract Values Row by Row ---
             try:
-                # Find all parameter__enum divs inside this expanded block
-                enum_divs = await get_block.locator(ENUM_CONTAINER_CSS).all()
+                # Find all table rows (tr) inside this specific GET block
+                rows = await get_block.locator(PARAM_ROW_CSS).all()
                 
-                if enum_divs:
-                    for enum_div in enum_divs:
-                        text_content = await enum_div.inner_text()
-                        # Cleanup text: "Available values : Undefined, MHI..."
-                        text_content = " ".join(text_content.split())
+                for row in rows:
+                    # check if this row has a parameter name
+                    name_el = row.locator(PARAM_NAME_CSS)
+                    
+                    if await name_el.count() > 0:
+                        # A. EXTRACT NAME
+                        raw_name = await name_el.inner_text()
+                        # Clean name: "tradingEntity *" -> "tradingEntity"
+                        # We remove newlines, asterisks, and generic spaces
+                        param_name = raw_name.replace('*', '').strip()
+                        param_name = param_name.split('\n')[0].strip() 
+
+                        # B. EXTRACT VALUES (if they exist in this row)
+                        enum_el = row.locator(PARAM_ENUM_CSS)
                         
-                        if "Available values" in text_content:
-                            # Split and parse
-                            parts = text_content.split("Available values")
-                            if len(parts) > 1:
-                                raw_vals = parts[1]
-                                raw_vals = raw_vals.replace(":", "").strip()
-                                raw_vals = raw_vals.replace('"', "").replace("'", "")
-                                
-                                items = [x.strip() for x in raw_vals.split(",") if x.strip()]
-                                all_values_found.extend(items)
-                
-                final_values = list(dict.fromkeys(all_values_found))
-                
-                if final_values:
-                    print(f"  -> Found: {final_values}")
-                else:
-                    print("  -> No values found.")
+                        if await enum_el.count() > 0:
+                            text_content = await enum_el.inner_text()
+                            # Cleaning logic: "Available values : A, B, C"
+                            text_content = " ".join(text_content.split()) # flatten whitespace
+                            
+                            if "Available values" in text_content:
+                                parts = text_content.split("Available values")
+                                if len(parts) > 1:
+                                    raw_vals = parts[1]
+                                    # Clean punctuation
+                                    raw_vals = raw_vals.replace(":", "").replace('"', "").replace("'", "").strip()
+                                    
+                                    # Convert to clean comma-separated string
+                                    # e.g. "MHI, MHEU, MBE"
+                                    clean_values_list = [x.strip() for x in raw_vals.split(",") if x.strip()]
+                                    final_val_str = ", ".join(clean_values_list)
+                                    
+                                    # ADD TO DICT: This creates the "column" logic
+                                    if final_val_str:
+                                        print(f"   -> Found {param_name}: {final_val_str}")
+                                        current_row_data[param_name] = final_val_str
 
             except Exception as e:
-                print(f"  -> Error: {e}")
-                final_values = []
+                print(f"   -> Error processing parameters: {e}")
 
-            result_rows.append({
-                "Endpoint": endpoint_path,
-                "AvailableValues": ", ".join(final_values) if final_values else ""
-            })
+            # Add this endpoint's completed dictionary to our master list
+            all_endpoints_data.append(current_row_data)
 
         await browser.close()
 
-        # Save to Excel
-        df = pd.DataFrame(result_rows)
+        # --- 4. Save to Excel ---
+        # Pandas is smart! It will take our list of dictionaries (which might have different keys)
+        # and align them perfectly into columns. Keys present in one dict but missing in others 
+        # will simply be blank cells.
+        df = pd.DataFrame(all_endpoints_data)
+        
+        # Optional: Reorder columns to put Endpoint first if needed (Pandas usually does this, but to be safe)
+        cols = ['Endpoint'] + [c for c in df.columns if c != 'Endpoint']
+        df = df[cols]
+        
         df.to_excel(EXCEL_FILE, index=False)
-        print(f"\nSaved to {EXCEL_FILE}")
+        print(f"\nSUCCESS: Report saved to {EXCEL_FILE} with dynamic columns!")
 
 if __name__ == "__main__":
-    asyncio.run(extract_get_endpoints_and_values(SAMPLE_URL))
+    asyncio.run(extract_swagger_data(SAMPLE_URL))
