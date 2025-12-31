@@ -1,0 +1,46 @@
+API/auth.py -> If the password is NONE, prompt to enter the password, else return the password as it is.
+
+API/fetch_tenant.py --> Store the source[PRD] tenant and target[SIT or UAT] tenant into the json [tenant_SOURCE.json, tenant_TARGET.json] files respectively. Flatten the files and store the content into tenant_data.xlsx-SOURCE and TARGET sheets respectively.
+
+API/fetch_swagger_urls.py --> Based on the given SYSTEM, REGION, URLTYPE, ENV_TARGET, and ENV_SOURCE in the APITESTDATA.JSON, filters and selects the particular row of data and updates the Swagger.xlsx file - SOURCE and TARGET sheet.
+
+API/fetch_swagger_metadata.py --> process_swagger_sheet function forms the swagger url. this process_swagger_sheet is called twice - one for SOURCE and another for TARGET. extract_endpoints function extracts all the end points contained in the swagger. this extract_endpoints is called twice - one for SOURCE and another for TARGET. The values - System, Region, Env, BASEURL, SwaggerURL, URLTYPE, Method, Endpoint, Tags, Response_Code, Response_Description, Parameters. These values are stored in SOURCE_METADATA, TARGET_METADATA. 
+
+API/compare_swagger_metadata.py --> compare SOURCE_Metadata and TARGET_Metadata sheets. merge_keys are System, Region, URLTYPE, Method, Endpoint, Tags. compare fields are Response_Code, Response_Description, Parameters. Comparison results will be stored in SOURCEvsTARGET_Metadata_Comparison.xlsx. 
+
+API/extract_save_response.py --> In SOURCEvsTARGET_Metadata_Comparison.xlsx, all the comparison fields match, the respective end point will be executed and response will be retrieved and stored as {tag}_{parameters}_{env}.json. If any of the parameter has no associated value, then it will error out to Response_Error.xlsx file. Ex. AmendmentsData_tradingEntity_reportingData_SOURCE.json, AmendmentsData_tradingEntity_reportingData_TARGET.json.
+          
+API/compare_responses.py --> compare AmendmentsData_tradingEntity_reportingData_SOURCE.json, AmendmentsData_tradingEntity_reportingData_TARGET.json and if matches report as MATCH, else report as MISMATCH.
+
+
+
+I want this program to be a standalone script. The fetched response should be written in a file named "DattaService.json" also in an excel sheet
+
+.env --> will hold the dataservice url for SOURCE and TARGET
+
+ExtractedEndPoints.py --> will extract all the endpoints and stores the end points and parameters and Enum in the file - ExtractedEndPoints.xlsx -> sheet name -SOURCE, TARGET
+
+
+User Input: TestConditionInclusion.xlsx File has the 2 types of filtering - 1. list of API parameters and values to be included for each parameter. 2. Which end point need to be tested for all. Blank means - Run for all, if mentioned run only those.
+
+TestPreparation.py --> will prepare the test case file with the end point url after replacing the variable by values - for ex. If 1 endpoint has 7 values for 1 parameter. 2   values are excluded. then it should include minimum of 2 test cases - each one for 1 value. same way - multiple test cases based on permutation and combination. Exclusion criteria should be followed based on the comma delimited values in the TestConditionExclusion.xlsx.
+
+
+
+
+
+     
+
+
+
+
+
+
+
+
+
+
+
+
+
+
