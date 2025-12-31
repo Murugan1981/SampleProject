@@ -2,15 +2,11 @@ import asyncio
 import os
 from playwright.async_api import async_playwright
 from Modules import config
+from auth import get_password  # Integrated custom auth module
 
 MAX_CONCURRENT_REQUESTS = 50 
 
 def get_headers():
-    """
-    Standard headers to mimic a browser. 
-    Note: We do NOT need to manually add Authorization headers here
-    because 'http_credentials' below handles the login.
-    """
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -18,16 +14,17 @@ def get_headers():
     }
 
 async def fetch_single_pair(context, test_case, dev_base, prod_base):
-    # Ensure URL formatting
     suffix = test_case['url_suffix']
     if not suffix.startswith('/'):
         suffix = '/' + suffix
         
     q_params = test_case.get('query_params', {})
     
-    # Clean URLs
     dev_full_url = dev_base.rstrip('/') + suffix
     prod_full_url = prod_base.rstrip('/') + suffix
+
+    # Logging URL for visibility (Phase 3 requirement)
+    print(f"   --> Firing: {dev_full_url} | Params: {q_params}")
 
     result = {
         "test_id": test_case['test_id'],
@@ -41,7 +38,6 @@ async def fetch_single_pair(context, test_case, dev_base, prod_base):
     }
 
     try:
-        # Fire requests using the Authenticated Context
         future_dev = context.get(dev_full_url, params=q_params)
         future_prod = context.get(prod_full_url, params=q_params)
         
@@ -50,7 +46,6 @@ async def fetch_single_pair(context, test_case, dev_base, prod_base):
         result['dev_status'] = resp_dev.status
         result['prod_status'] = resp_prod.status
 
-        # Parse Responses
         try: result['dev_response'] = await resp_dev.json()
         except: result['dev_response'] = await resp_dev.text()
             
@@ -66,24 +61,28 @@ async def run_parallel_tests(test_cases, dev_base_url, prod_base_url):
     results = []
     sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-    # 1. Load Credentials from .env
+    # Credential Logic
     username = os.getenv("USERNAME")
-    password = os.getenv("PASSWORD")
+    try:
+        password = get_password() # Retrieving from auth module
+    except ImportError:
+        print("❌ Critical: 'auth.py' not found or get_password() missing.")
+        password = None
+    except Exception as e:
+        print(f"❌ Critical: Password retrieval failed: {e}")
+        password = None
     
     creds = None
     if username and password:
         creds = {"username": username, "password": password}
-        print(f"   🔒 Authenticating as user: {username}")
     else:
-        print("   ⚠️ No credentials found in .env (USERNAME/PASSWORD). Sending anonymous requests.")
-
+        print("   ⚠️ Missing credentials. Running unauthenticated.")
+    
     async with async_playwright() as p:
-        # 2. Create Context with HTTP Credentials
-        # This handles Basic Auth, NTLM, and Digest automatically.
         api_context = await p.request.new_context(
             ignore_https_errors=True,
             extra_http_headers=get_headers(),
-            http_credentials=creds  # <--- THE FIX
+            http_credentials=creds 
         )
         
         async def sem_task(tc):
