@@ -15,18 +15,12 @@ ENDPOINT_COL = "endpoint"
 
 # -------------------- HELPERS --------------------
 def normalize_values(value):
-    """
-    Convert comma-separated string to normalized set
-    """
     if pd.isna(value) or str(value).strip() == "":
         return set()
     return {v.strip() for v in str(value).split(",") if v.strip()}
 
 
 def diff_target_extra(source_val, target_val):
-    """
-    Return only extra values present in TARGET compared to SOURCE
-    """
     src_set = normalize_values(source_val)
     tgt_set = normalize_values(target_val)
     extra = tgt_set - src_set
@@ -41,17 +35,15 @@ def main():
     source_df = pd.read_excel(INPUT_FILE, sheet_name=SOURCE_SHEET)
     target_df = pd.read_excel(INPUT_FILE, sheet_name=TARGET_SHEET)
 
-    # Ensure endpoint exists
     if ENDPOINT_COL not in source_df.columns or ENDPOINT_COL not in target_df.columns:
-        raise Exception("endpoint column missing in SOURCE or TARGET sheet")
+        raise Exception("endpoint column missing in SOURCE or TARGET")
 
-    # Identify parameter columns (exclude meta columns)
+    # -------- META + PARAM COLUMNS --------
     meta_cols = {"tag", "method", "endpoint"}
-    param_cols = sorted(
-        (set(source_df.columns) | set(target_df.columns)) - meta_cols
-    )
+    all_columns = set(source_df.columns) | set(target_df.columns)
+    param_cols = sorted(all_columns - meta_cols)
 
-    # Merge on endpoint (FULL OUTER)
+    # -------- MERGE --------
     merged = pd.merge(
         source_df,
         target_df,
@@ -64,25 +56,28 @@ def main():
     output_rows = []
 
     for _, row in merged.iterrows():
-        endpoint = row[ENDPOINT_COL]
+        merge_flag = row["_merge"]
 
-        # -------- RESULT CLASSIFICATION --------
-        if row["_merge"] == "both":
+        # -------- RESULT --------
+        if merge_flag == "both":
             result = "MATCH in Both"
-        elif row["_merge"] == "left_only":
+        elif merge_flag == "left_only":
             result = "Endpoint only in SOURCE"
         else:
             result = "Endpoint only in TARGET"
 
         out = {
-            "SOURCE_endpoint": row[ENDPOINT_COL]
-            if row["_merge"] != "right_only"
-            else "",
-            "TARGET_endpoint": row[ENDPOINT_COL]
-            if row["_merge"] != "left_only"
-            else "",
+            "SOURCE_endpoint": row[ENDPOINT_COL] if merge_flag != "right_only" else "",
+            "TARGET_endpoint": row[ENDPOINT_COL] if merge_flag != "left_only" else "",
             "RESULT": result,
         }
+
+        # -------- TAG & METHOD --------
+        out["Tag_SOURCE"] = row.get("tag_SOURCE", "") if merge_flag != "right_only" else ""
+        out["Tag_TARGET"] = row.get("tag_TARGET", "") if merge_flag != "left_only" else ""
+
+        out["Method_SOURCE"] = row.get("method_SOURCE", "") if merge_flag != "right_only" else ""
+        out["Method_TARGET"] = row.get("method_TARGET", "") if merge_flag != "left_only" else ""
 
         mismatch_comments = []
 
@@ -91,17 +86,14 @@ def main():
             src_col = f"{param}_SOURCE"
             tgt_col = f"{param}_TARGET"
 
-            src_val = row[src_col] if src_col in row else ""
-            tgt_val = row[tgt_col] if tgt_col in row else ""
+            src_val = row.get(src_col, "")
+            tgt_val = row.get(tgt_col, "")
 
-            # Store raw values
-            out[src_col] = src_val if not pd.isna(src_val) else ""
-            out[tgt_col] = tgt_val if not pd.isna(tgt_val) else ""
+            out[src_col] = "" if pd.isna(src_val) else src_val
+            out[tgt_col] = "" if pd.isna(tgt_val) else tgt_val
 
-            # Compare only when endpoint exists in both
-            if row["_merge"] == "both":
+            if merge_flag == "both":
                 extra_target = diff_target_extra(src_val, tgt_val)
-
                 if extra_target:
                     out[tgt_col] = extra_target
                     mismatch_comments.append(
@@ -120,7 +112,3 @@ def main():
     result_df.to_excel(OUTPUT_FILE, index=False)
 
     print(f"Comparison completed → {OUTPUT_FILE}")
-
-
-if __name__ == "__main__":
-    main()
