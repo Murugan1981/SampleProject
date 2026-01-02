@@ -1,99 +1,116 @@
 import os
+import json
 import itertools
 import pandas as pd
 from dotenv import load_dotenv
 
-# ----------------------- BLOCK: Load Config -----------------------
-# Load environment variables from .env file
+# =====================================================
+# LOAD ENVIRONMENT VARIABLES
+# =====================================================
 load_dotenv()
-SOURCE_BASE_URL = os.getenv('SourceBaseURL', '').strip()
-TARGET_BASE_URL = os.getenv('TargetBaseURL', '').strip()
 
-# Check if base URLs are loaded
+SOURCE_BASE_URL = os.getenv("SourceBaseURL")
+TARGET_BASE_URL = os.getenv("TargetBaseURL")
+
 if not SOURCE_BASE_URL or not TARGET_BASE_URL:
-    raise Exception("SourceBaseURL and TargetBaseURL must be set in the .env file")
+    raise Exception("SourceBaseURL / TargetBaseURL missing in .env")
 
-# ----------------------- BLOCK: Read Input Excel -----------------------
-# Read the inclusion criteria Excel file
-INPUT_FILE = 'TestCaseInclusion.xlsx'
-OUTPUT_FILE = 'pl_testcases.xlsx'
-SHEET_NAME = 'Sheet1'
+# =====================================================
+# LOAD reportingDate FROM ApiTestData.json
+# =====================================================
+API_TESTDATA_FILE = "ApiTestData.json"
 
-# Load the Excel sheet
-df = pd.read_excel(INPUT_FILE, sheet_name=SHEET_NAME)
+with open(API_TESTDATA_FILE, "r") as f:
+    api_data = json.load(f)
 
-# ----------------------- BLOCK: Helper Function -----------------------
-def expand_row(row):
-    """
-    For a given row, generate all test case permutations based on 
-    all possible combinations of parameter values (comma-separated).
-    Returns a list of dicts with the testcase info.
-    """
-    # Static fields: tag, method, endpoint
-    tag = str(row['tag']).strip()
-    method = str(row['method']).strip()
-    endpoint_template = str(row['endpoint']).strip()
+reporting_date = api_data["TestData"]["default"]["reportingDate"]
 
-    # Find parameter columns (everything after 'endpoint')
-    param_cols = [col for col in row.index if col not in ['tag', 'method', 'endpoint']]
+# =====================================================
+# INPUT / OUTPUT FILES
+# =====================================================
+INPUT_EXCEL = "TestCaseInclusion.xlsx"
+INPUT_SHEET = "Sheet1"
+OUTPUT_EXCEL = "pl_testcases.xlsx"
 
-    # Parse possible values for each parameter (split by ',')
-    param_values_lists = []
-    for col in param_cols:
-        # If cell is nan or empty, treat as empty list
-        cell_val = str(row[col]).strip()
-        if cell_val and cell_val.lower() != 'nan':
-            # Split by comma, remove extra spaces
-            values = [v.strip() for v in cell_val.split(',') if v.strip()]
-        else:
-            values = []
-        param_values_lists.append(values)
+# =====================================================
+# READ INPUT EXCEL
+# =====================================================
+df = pd.read_excel(INPUT_EXCEL, sheet_name=INPUT_SHEET)
 
-    # Cartesian product of all parameters
-    all_param_combinations = list(itertools.product(*param_values_lists)) if param_values_lists else [[]]
+# Expected base columns
+BASE_COLS = {"tag", "method", "endpoint"}
 
-    testcases = []
-    # For each combination, substitute in the endpoint and build test case row
-    for idx, param_combo in enumerate(all_param_combinations, start=1):
-        param_dict = dict(zip(param_cols, param_combo))
+missing = BASE_COLS - set(df.columns)
+if missing:
+    raise Exception(f"Missing mandatory columns in TestCaseInclusion.xlsx: {missing}")
 
-        # Fill endpoint placeholders with parameter values
-        endpoint_final = endpoint_template
-        for param, val in param_dict.items():
-            endpoint_final = endpoint_final.replace('{' + param + '}', val)
+# Parameter columns = everything except base columns
+PARAM_COLS = [c for c in df.columns if c not in BASE_COLS]
 
-        # Construct request URLs
-        source_url = SOURCE_BASE_URL.rstrip('/') + endpoint_final
-        target_url = TARGET_BASE_URL.rstrip('/') + endpoint_final
+# =====================================================
+# GENERATE TEST CASES (STRICT ROW BY ROW)
+# =====================================================
+testcases = []
+tag_counter = {}
 
-        # Construct test case row
-        testcase = {
-            'TestCaseID': f"{tag}_{idx:03d}",
-            'TagName': tag,
-            'SourceBaseURL': SOURCE_BASE_URL,
-            'TargetBaseURL': TARGET_BASE_URL,
-            'SourceRequestURL': source_url,
-            'TargetRequestURL': target_url,
-        }
-        # Add all parameter columns (for reference)
-        for param in param_cols:
-            testcase[param] = param_dict.get(param, '')
-
-        testcases.append(testcase)
-
-    return testcases
-
-# ----------------------- BLOCK: Generate All Test Cases -----------------------
-all_testcases = []
 for _, row in df.iterrows():
-    # For each row, expand to multiple testcases
-    all_testcases.extend(expand_row(row))
 
-# Convert to DataFrame
-df_out = pd.DataFrame(all_testcases)
+    tag = str(row["tag"]).strip()
+    method = str(row["method"]).strip()
+    endpoint_template = str(row["endpoint"]).strip()
 
-# ----------------------- BLOCK: Write Output Excel -----------------------
-# Write to Excel (index=False)
-df_out.to_excel(OUTPUT_FILE, index=False)
-print(f"Generated {len(df_out)} test cases to {OUTPUT_FILE}")
+    # Prepare parameter values ONLY FROM THIS ROW
+    param_values = {}
 
+    for col in PARAM_COLS:
+        cell = row[col]
+
+        if pd.isna(cell):
+            continue
+
+        values = [v.strip() for v in str(cell).split(",") if v.strip()]
+        if values:
+            param_values[col] = values
+
+    # Inject reportingDate from JSON (NOT Excel)
+    if "{reportingDate}" in endpoint_template:
+        param_values["reportingDate"] = [reporting_date]
+
+    # If no params, still generate one testcase
+    if not param_values:
+        param_combinations = [()]
+        param_keys = []
+    else:
+        param_keys = list(param_values.keys())
+        param_combinations = itertools.product(*[param_values[k] for k in param_keys])
+
+    # =================================================
+    # COMPLETE ALL COMBINATIONS FOR THIS ROW
+    # =================================================
+    for combo in param_combinations:
+
+        resolved_endpoint = endpoint_template
+
+        for k, v in zip(param_keys, combo):
+            resolved_endpoint = resolved_endpoint.replace(f"{{{k}}}", v)
+
+        tag_counter[tag] = tag_counter.get(tag, 0) + 1
+        test_case_id = f"{tag}_{tag_counter[tag]:03d}"
+
+        testcases.append({
+            "TestCaseID": test_case_id,
+            "TagName": tag,
+            "SourceBaseURL": SOURCE_BASE_URL,
+            "TargetBaseURL": TARGET_BASE_URL,
+            "SourceRequestURL": SOURCE_BASE_URL.rstrip("/") + resolved_endpoint,
+            "TargetRequestURL": TARGET_BASE_URL.rstrip("/") + resolved_endpoint
+        })
+
+# =====================================================
+# WRITE OUTPUT
+# =====================================================
+output_df = pd.DataFrame(testcases)
+output_df.to_excel(OUTPUT_EXCEL, index=False)
+
+print(f"Generated {len(output_df)} test cases")
+print(f"Output file: {OUTPUT_EXCEL}")
