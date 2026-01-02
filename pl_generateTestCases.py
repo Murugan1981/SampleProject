@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ENDPOINTS_FILE = os.path.join("API", "reports", "endpoints.xlsx")
+INCLUSION_FILE = os.path.join("API", "shared", "input", "TestInclusionCriteria.xlsx")
 OUTPUT_FILE = os.path.join("API", "reports", "pl_testcases.xlsx")
 API_TESTDATA_FILE = os.path.join("API", "ApiTestData.json")
 
@@ -18,108 +19,170 @@ SOURCE_BASEURL = os.getenv("SOURCE_BASEURL")
 TARGET_BASEURL = os.getenv("TARGET_BASEURL")
 
 if not SOURCE_BASEURL or not TARGET_BASEURL:
-    raise Exception("SOURCE_BASEURL / TARGET_BASEURL missing in .env")
+    raise Exception("Missing SOURCE_BASEURL or TARGET_BASEURL in .env")
+
+# Output columns (match your expected baseline)
+OUT_COLS = [
+    "TestCaseID",
+    "TagName",
+    "SourceBaseURL",
+    "TargetBaseURL",
+    "SourceRequestURL",
+    "TargetRequestURL",
+    "Comments",
+]
 
 
 # -------------------- HELPERS --------------------
-def load_reporting_date():
+def load_reporting_date() -> str:
     with open(API_TESTDATA_FILE, "r") as f:
         data = json.load(f)
+    # Your existing structure
     return data["TestData"]["default"]["reportingDate"]
 
 
-def parse_values(value):
-    if pd.isna(value) or str(value).strip() == "":
+def parse_csv_values(cell) -> list[str]:
+    """Parse 'A,B,C' into ['A','B','C']"""
+    if pd.isna(cell) or str(cell).strip() == "":
         return []
-    return [v.strip() for v in str(value).split(",") if v.strip()]
+    return [v.strip() for v in str(cell).split(",") if v.strip()]
 
 
-def extract_path_params(endpoint):
-    return [
-        p.strip("{}")
-        for p in endpoint.split("/")
-        if p.startswith("{") and p.endswith("}")
-    ]
+def extract_path_params(endpoint: str) -> list[str]:
+    """Extract {param} names from path"""
+    params = []
+    for part in str(endpoint).split("/"):
+        if part.startswith("{") and part.endswith("}"):
+            params.append(part.strip("{}").strip())
+    return params
 
 
-def resolve_endpoint(endpoint, param_map):
+def resolve_endpoint(endpoint_template: str, param_map: dict[str, str]) -> str:
+    resolved = endpoint_template
     for k, v in param_map.items():
-        endpoint = endpoint.replace(f"{{{k}}}", v)
-    return endpoint
+        resolved = resolved.replace("{" + k + "}", v)
+    return resolved
+
+
+def get_case_insensitive_value(row: pd.Series, colname: str):
+    """Return row[colname] ignoring case; None if not found."""
+    lower_map = {c.lower(): c for c in row.index}
+    key = lower_map.get(colname.lower())
+    if not key:
+        return None
+    return row.get(key)
 
 
 # -------------------- CORE LOGIC --------------------
 def main():
+    # --- basic file checks ---
+    if not os.path.exists(ENDPOINTS_FILE):
+        raise FileNotFoundError(ENDPOINTS_FILE)
+    if not os.path.exists(INCLUSION_FILE):
+        raise FileNotFoundError(INCLUSION_FILE)
+    if not os.path.exists(API_TESTDATA_FILE):
+        raise FileNotFoundError(API_TESTDATA_FILE)
+
     reporting_date = load_reporting_date()
 
-    source_df = pd.read_excel(ENDPOINTS_FILE, sheet_name=SOURCE_SHEET)
-    target_df = pd.read_excel(ENDPOINTS_FILE, sheet_name=TARGET_SHEET)
+    # --- read endpoints.xlsx ---
+    src_df = pd.read_excel(ENDPOINTS_FILE, sheet_name=SOURCE_SHEET)
+    tgt_df = pd.read_excel(ENDPOINTS_FILE, sheet_name=TARGET_SHEET)
 
-    # Merge SOURCE & TARGET endpoints
-    merged = pd.merge(
-        source_df,
-        target_df,
-        on=["endpoint", "tag", "method"],
-        suffixes=("_SOURCE", "_TARGET")
+    required_cols = {"tag", "method", "endpoint"}
+    if not required_cols.issubset(set(src_df.columns)) or not required_cols.issubset(set(tgt_df.columns)):
+        raise Exception("endpoints.xlsx must contain columns: tag, method, endpoint (in SOURCE and TARGET sheets)")
+
+    # Endpoints that exist in BOTH environments (same tag/method/endpoint)
+    both_df = pd.merge(
+        src_df[["tag", "method", "endpoint"]],
+        tgt_df[["tag", "method", "endpoint"]],
+        on=["tag", "method", "endpoint"],
+        how="inner",
+    )
+
+    # --- read inclusion criteria ---
+    # Use first sheet by default (user’s screenshots indicate single sheet)
+    incl_df = pd.read_excel(INCLUSION_FILE)
+
+    if not required_cols.issubset(set(incl_df.columns)):
+        raise Exception("TestInclusionCriteria.xlsx must contain columns: tag, method, endpoint")
+
+    # Filter inclusion to only endpoints present in BOTH SOURCE and TARGET
+    incl_df = pd.merge(
+        incl_df,
+        both_df,
+        on=["tag", "method", "endpoint"],
+        how="inner"
     )
 
     test_rows = []
-    test_counter = {}
+    counters_by_tag = {}
 
-    for _, row in merged.iterrows():
-        endpoint_template = row["endpoint"]
-        tag = row["tag"]
-        method = row["method"]
+    for _, incl_row in incl_df.iterrows():
+        tag = str(incl_row["tag"]).strip()
+        method = str(incl_row["method"]).strip().upper()
+        endpoint_template = str(incl_row["endpoint"]).strip()
 
-        # Only GET endpoints (baseline rule)
+        # baseline: only GET (as per your current scope)
         if method != "GET":
             continue
 
         path_params = extract_path_params(endpoint_template)
 
-        param_values = {}
+        # Build param -> list(values) using inclusion criteria
+        param_values: dict[str, list[str]] = {}
 
         for p in path_params:
-            if p == "reportingDate":
+            if p.lower() == "reportingdate":
                 param_values[p] = [reporting_date]
-            else:
-                values = parse_values(row.get(p))
-                if not values:
-                    param_values = {}
-                    break
-                param_values[p] = values
+                continue
+
+            cell = get_case_insensitive_value(incl_row, p)
+            values = parse_csv_values(cell)
+
+            # If inclusion criteria does not provide values -> cannot generate testcases
+            # (This is intentional: inclusion file is the driver)
+            if not values:
+                param_values = {}
+                break
+
+            param_values[p] = values
 
         if not param_values:
+            # Skip silently: endpoint not runnable per inclusion criteria
             continue
 
-        # Cartesian expansion
+        # Cartesian product of all param lists
         keys = list(param_values.keys())
-        combinations = itertools.product(*param_values.values())
-
-        for combo in combinations:
+        for combo in itertools.product(*[param_values[k] for k in keys]):
             param_map = dict(zip(keys, combo))
             resolved_endpoint = resolve_endpoint(endpoint_template, param_map)
 
-            tag_key = tag
-            test_counter[tag_key] = test_counter.get(tag_key, 0) + 1
+            # per-tag running counter for TestCaseID
+            counters_by_tag[tag] = counters_by_tag.get(tag, 0) + 1
+            tc_id = f"{tag}_{counters_by_tag[tag]:03d}"
 
-            test_case_id = f"{tag}_{test_counter[tag_key]:03d}"
+            source_url = f"{SOURCE_BASEURL}{resolved_endpoint}"
+            target_url = f"{TARGET_BASEURL}{resolved_endpoint}"
 
             test_rows.append({
-                "TestCaseID": test_case_id,
-                "TagName": tag,
+                "TestCaseID": tc_id,
+                "TagName": tag,  # copy-paste from inclusion tag
                 "SourceBaseURL": SOURCE_BASEURL,
                 "TargetBaseURL": TARGET_BASEURL,
-                "SourceRequestURL": f"{SOURCE_BASEURL}{resolved_endpoint}",
-                "TargetRequestURL": f"{TARGET_BASEURL}{resolved_endpoint}",
+                "SourceRequestURL": source_url,
+                "TargetRequestURL": target_url,
+                "Comments": ""
             })
 
-    result_df = pd.DataFrame(test_rows)
+    out_df = pd.DataFrame(test_rows, columns=OUT_COLS)
 
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-    result_df.to_excel(OUTPUT_FILE, index=False)
+    out_df.to_excel(OUTPUT_FILE, index=False)
 
-    print(f"Baselined test cases generated → {OUTPUT_FILE}")
+    print(f"pl_testcases.xlsx generated → {OUTPUT_FILE}")
+    print(f"Total testcases: {len(out_df)}")
 
 
 if __name__ == "__main__":
