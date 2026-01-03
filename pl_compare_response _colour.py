@@ -31,11 +31,11 @@ def load_json(filepath):
 # -------- Main Comparison --------
 def compare_jsons(source_data, target_data):
     if source_data is None or target_data is None:
-        return "NotMatch", "Missing or invalid JSON"
+        return "NotMatch"
     diff = DeepDiff(source_data, target_data, ignore_order=True)
     if not diff:
-        return "Match", ""
-    return "NotMatch", json.dumps(diff, indent=2)
+        return "Match"
+    return "NotMatch"
 
 def main():
     df = pd.read_excel(INPUT_XLSX)
@@ -57,7 +57,7 @@ def main():
         src_json = load_json(src_path)
         tgt_json = load_json(tgt_path)
 
-        result, comment = compare_jsons(src_json, tgt_json)
+        result = compare_jsons(src_json, tgt_json)
 
         # Truncate and stringify JSON for preview
         src_preview = json.dumps(src_json)[:100] if result == "NotMatch" and src_json else ""
@@ -73,7 +73,6 @@ def main():
             "SourceResponse": src_file,
             "TargetResponse": tgt_file,
             "ComparisonResult": result,
-            "Comments": comment if result == "NotMatch" else "",
             "SourceSnapshot": src_preview,
             "TargetSnapshot": tgt_preview
         })
@@ -90,8 +89,8 @@ def main():
 
     for row in ws.iter_rows(min_row=2):
         comparison_cell = row[8]  # ComparisonResult
-        source_snapshot_cell = row[10]  # SourceSnapshot
-        target_snapshot_cell = row[11]  # TargetSnapshot
+        source_snapshot_cell = row[9]  # SourceSnapshot
+        target_snapshot_cell = row[10]  # TargetSnapshot
 
         if comparison_cell.value == "NotMatch":
             source_snapshot_cell.fill = yellow_fill
