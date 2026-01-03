@@ -9,17 +9,23 @@ import requests
 from dotenv import load_dotenv
 from requests_ntlm import HttpNtlmAuth
 
+from unicodedata import normalize
+from urllib.parse import urlparse
+
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ================= LOAD ENV =================
 load_dotenv()
 
 USERNAME = os.getenv("USERNAME")
 PASSWORD = get_password()
 if not USERNAME or not PASSWORD:
     raise Exception("Missing USERNAME or PASSWORD")
+
 AUTH = HttpNtlmAuth(USERNAME, PASSWORD)
 
+# ================= PATHS ====================
 INPUT_TESTCASE_FILE = "shared/reports/pl_testcases.xlsx"
 APITESTDATA_FILE = "shared/input/ApiTestData.json"
 REPORT_BASE = "shared/reports"
@@ -27,9 +33,10 @@ REPORT_EXTRACT_RESPONSES = os.path.join(REPORT_BASE, "pl_extract_save_responses.
 
 REQUEST_LIMIT = 10
 
-# =========== BLOCK: Load System Name ===========
+# ================= LOAD SYSTEM NAME =========
 with open(APITESTDATA_FILE, "r") as f:
     api_testdata = json.load(f)
+
 SYSTEM = api_testdata.get("System", "UNKNOWN_SYSTEM")
 
 SOURCE_JSON_FOLDER = os.path.join(REPORT_BASE, SYSTEM, "Source_json")
@@ -37,12 +44,38 @@ TARGET_JSON_FOLDER = os.path.join(REPORT_BASE, SYSTEM, "Target_json")
 os.makedirs(SOURCE_JSON_FOLDER, exist_ok=True)
 os.makedirs(TARGET_JSON_FOLDER, exist_ok=True)
 
-# =========== BLOCK: Read Test Case Excel ===========
+# ================= READ EXCEL ===============
 df = pd.read_excel(INPUT_TESTCASE_FILE)
+
 if "SourceRequestURL" not in df.columns or "TargetRequestURL" not in df.columns:
     raise Exception("Missing required columns in test case file.")
 
-# =========== BLOCK: Helpers ===========
+# ================= HELPERS ==================
+def sanitize_url(url: str) -> str:
+    """
+    CRITICAL FIX:
+    Removes Excel / Unicode invisible characters that break Chrome navigation
+    """
+    if not url:
+        return ""
+    return (
+        normalize("NFKC", str(url))
+        .replace("\u00A0", "")   # non-breaking space
+        .replace("\u200B", "")   # zero-width space
+        .replace("\uFEFF", "")   # BOM
+        .strip()
+    )
+
+def is_valid_url(url: str) -> bool:
+    """
+    Guardrail: ensures Chrome + requests treat it as URL, not search text
+    """
+    try:
+        p = urlparse(url)
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False
+
 def save_json_response(url, auth, out_path):
     try:
         resp = requests.get(url, auth=auth, timeout=30, verify=False)
@@ -51,9 +84,12 @@ def save_json_response(url, auth, out_path):
             data = resp.json()
         except Exception:
             data = resp.text
+
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+
         return True, None
+
     except Exception as ex:
         return False, str(ex)
 
@@ -72,7 +108,6 @@ def get_param_columns(df):
 
 def expand_urls(raw_url):
     """
-    FIX: If URL contains comma-separated values, expand them correctly.
     exurl/a,b  =>  [exurl/a, exurl/b]
     """
     if "," not in raw_url:
@@ -82,7 +117,7 @@ def expand_urls(raw_url):
     values = [v.strip() for v in tail.split(",") if v.strip()]
     return [f"{base}/{v}" for v in values]
 
-# =========== BLOCK: Main ===========
+# ================= MAIN =====================
 def main():
     total_rows = len(df)
     param_cols = get_param_columns(df)
@@ -95,28 +130,40 @@ def main():
         if REQUEST_LIMIT and processed >= REQUEST_LIMIT:
             break
 
-        tagname = str(row["TagName"]).strip() if "TagName" in row else "no_tag"
+        tagname = str(row.get("TagName", "no_tag")).strip()
         param_str = extract_param_string(row, param_cols)
 
         src_err = ""
         tgt_err = ""
 
-        # -------- SOURCE --------
-        src_url_raw = str(row["SourceRequestURL"]).strip()
+        # ---------- SOURCE ----------
+        src_url_raw = sanitize_url(row["SourceRequestURL"])
         if src_url_raw:
             for i, src_url in enumerate(expand_urls(src_url_raw), start=1):
+
+                if not is_valid_url(src_url):
+                    src_err += f"[INVALID_URL: {repr(src_url)}] | "
+                    continue
+
                 src_filename = f"{tagname}_{param_str}_{i}.json"
                 src_path = os.path.join(SOURCE_JSON_FOLDER, src_filename)
+
                 success, err = save_json_response(src_url, AUTH, src_path)
                 if not success:
                     src_err += f"[{src_url}] {err} | "
 
-        # -------- TARGET --------
-        tgt_url_raw = str(row["TargetRequestURL"]).strip()
+        # ---------- TARGET ----------
+        tgt_url_raw = sanitize_url(row["TargetRequestURL"])
         if tgt_url_raw:
             for i, tgt_url in enumerate(expand_urls(tgt_url_raw), start=1):
+
+                if not is_valid_url(tgt_url):
+                    tgt_err += f"[INVALID_URL: {repr(tgt_url)}] | "
+                    continue
+
                 tgt_filename = f"{tagname}_{param_str}_{i}.json"
                 tgt_path = os.path.join(TARGET_JSON_FOLDER, tgt_filename)
+
                 success, err = save_json_response(tgt_url, AUTH, tgt_path)
                 if not success:
                     tgt_err += f"[{tgt_url}] {err} | "
