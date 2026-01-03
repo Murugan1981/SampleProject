@@ -37,12 +37,6 @@ def compare_jsons(source_data, target_data):
         return "Match", ""
     return "NotMatch", json.dumps(diff, indent=2)
 
-def highlight_discrepancy(source_data, target_data):
-    return (
-        f"SOURCE: {json.dumps(source_data, indent=2)}\n\n"
-        f"TARGET: {json.dumps(target_data, indent=2)}"
-    )
-
 def main():
     df = pd.read_excel(INPUT_XLSX)
     output_rows = []
@@ -63,8 +57,11 @@ def main():
         src_json = load_json(src_path)
         tgt_json = load_json(tgt_path)
 
-        result, _ = compare_jsons(src_json, tgt_json)
-        comment = highlight_discrepancy(src_json, tgt_json) if result == "NotMatch" else ""
+        result, comment = compare_jsons(src_json, tgt_json)
+
+        # Truncate and stringify JSON for preview
+        src_preview = json.dumps(src_json)[:100] if result == "NotMatch" and src_json else ""
+        tgt_preview = json.dumps(tgt_json)[:100] if result == "NotMatch" and tgt_json else ""
 
         output_rows.append({
             "TestCaseID": testcase_id,
@@ -76,7 +73,9 @@ def main():
             "SourceResponse": src_file,
             "TargetResponse": tgt_file,
             "ComparisonResult": result,
-            "Comments": comment
+            "Comments": comment if result == "NotMatch" else "",
+            "SourceSnapshot": src_preview,
+            "TargetSnapshot": tgt_preview
         })
 
     df_out = pd.DataFrame(output_rows)
@@ -91,10 +90,12 @@ def main():
 
     for row in ws.iter_rows(min_row=2):
         comparison_cell = row[8]  # ComparisonResult
-        comments_cell = row[9]    # Comments
-        if comparison_cell.value == "NotMatch" and comments_cell.value:
-            if "SOURCE:" in comments_cell.value:
-                comments_cell.fill = yellow_fill
+        source_snapshot_cell = row[10]  # SourceSnapshot
+        target_snapshot_cell = row[11]  # TargetSnapshot
+
+        if comparison_cell.value == "NotMatch":
+            source_snapshot_cell.fill = yellow_fill
+            target_snapshot_cell.fill = blue_fill
 
     wb.save(OUTPUT_XLSX)
     print(f"✅ Comparison complete. Output written to → {OUTPUT_XLSX}")
