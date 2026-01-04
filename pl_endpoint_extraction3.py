@@ -128,6 +128,7 @@ async def run():
     
     system = config['System']
     env_target = config['Env_Target']
+    env_source = config['Env_Source']
     region = config['Region']
     url_type = config['URLTYPE']
     
@@ -246,10 +247,15 @@ async def run():
         if not os.path.exists(ENV_FILE):
             open(ENV_FILE, "w").close()
 
-        # Save with dynamic key based on config
-        env_key = f"{system}_{url_type}_URL"
+        # Save with dynamic key: {System}_{Region}_{Env_Target}_{Env_Source}
+        env_key = f"{system}_{region}_{env_target}_{env_source}"
         set_key(ENV_FILE, env_key, iframe_src)
-        print(f"✓ Saved to {ENV_FILE} as {env_key}")
+        
+        print(f"\n{'='*60}")
+        print(f"✓ Saved to {ENV_FILE}")
+        print(f"  Variable: {env_key}")
+        print(f"  Value: {iframe_src}")
+        print(f"{'='*60}\n")
 
         await browser.close()
 
