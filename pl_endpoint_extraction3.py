@@ -177,6 +177,20 @@ async def run():
                 print(f"IFRAME SRC: {iframe_src}")
                 print(f"{'='*60}\n")
                 
+                # -------- SAVE TO .env --------
+                if not os.path.exists(ENV_FILE):
+                    open(ENV_FILE, "w").close()
+
+                # Save with dynamic key: {System}_{Region}_{Env_Target}_{Env_Source}
+                env_key = f"{system}_{region}_{env_target}_{env_source}"
+                set_key(ENV_FILE, env_key, iframe_src)
+                
+                print(f"\n{'='*60}")
+                print(f"✓ Saved to {ENV_FILE}")
+                print(f"  Variable: {env_key}")
+                print(f"  Value: {iframe_src}")
+                print(f"{'='*60}\n")
+                
                 # Stop here as requested
                 await browser.close()
                 return
