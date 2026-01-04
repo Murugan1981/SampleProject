@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import pandas as pd
 from dotenv import load_dotenv, set_key
@@ -9,6 +10,7 @@ load_dotenv()
 
 BASE_URL = "http://rdb"
 ENV_FILE = ".env"
+CONFIG_FILE = os.path.join("shared", "input", "ApiTestData.json")
 
 OUTPUT_FILE = os.path.join("API", "reports", "endpoints.xlsx")
 
@@ -17,6 +19,25 @@ PATH_SELECTOR = ".opblock-summary-path"
 PARAM_ROW_SELECTOR = "tr"
 PARAM_NAME_SELECTOR = ".parameter__name"
 PARAM_ENUM_SELECTOR = ".parameter__enum"
+
+
+# -------------------- LOAD CONFIG --------------------
+def load_config():
+    """Load configuration from ApiTestData.json"""
+    if not os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError(f"Config file not found: {CONFIG_FILE}")
+    
+    with open(CONFIG_FILE, 'r') as f:
+        config = json.load(f)
+    
+    print(f"✓ Loaded config from {CONFIG_FILE}")
+    print(f"  System: {config['System']}")
+    print(f"  Env_Target: {config['Env_Target']}")
+    print(f"  Env_Source: {config['Env_Source']}")
+    print(f"  Region: {config['Region']}")
+    print(f"  URLTYPE: {config['URLTYPE']}")
+    
+    return config
 
 
 # -------------------- SWAGGER EXTRACTION --------------------
@@ -102,6 +123,14 @@ async def process_environment(env_name, swagger_url):
 
 # -------------------- MAIN FLOW --------------------
 async def run():
+    # Load configuration
+    config = load_config()
+    
+    system = config['System']
+    env_target = config['Env_Target']
+    region = config['Region']
+    url_type = config['URLTYPE']
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         context = await browser.new_context()
@@ -111,13 +140,22 @@ async def run():
         await page.goto(BASE_URL, wait_until="domcontentloaded")
         await page.wait_for_timeout(4000)
 
-        await page.get_by_text("Europe", exact=True).click()
+        # Select Region
+        await page.get_by_text(region, exact=True).click()
+        
+        # Select System
         await page.get_by_text("Select system...").click()
-        await page.get_by_role("searchbox", name="Filter").fill("jil")
-        await page.get_by_role("option", name="JIL").click()
-        await page.get_by_role("button", name="JIL | SIT2 | Europe").click()
-        await page.get_by_role("link", name="Data Service").click()
-        await page.get_by_role("link", name="Data Service").press("NumLock")
+        await page.get_by_role("searchbox", name="Filter").fill(system.lower())
+        await page.get_by_role("option", name=system).click()
+        
+        # Select Environment
+        button_text = f"{system} | {env_target} | {region}"
+        await page.get_by_role("button", name=button_text).click()
+        
+        # Navigate to Service based on URLTYPE
+        service_name = "Data Service" if url_type == "DATASERVICE" else url_type
+        await page.get_by_role("link", name=service_name).click()
+        await page.get_by_role("link", name=service_name).press("NumLock")
         
         # -------- WAIT FOR IFRAME (FIXED) --------
         try:
@@ -208,8 +246,10 @@ async def run():
         if not os.path.exists(ENV_FILE):
             open(ENV_FILE, "w").close()
 
-        set_key(ENV_FILE, "JIL_DATASERVICE_URL", swagger_url)
-        print(f"✓ Saved to {ENV_FILE}")
+        # Save with dynamic key based on config
+        env_key = f"{system}_{url_type}_URL"
+        set_key(ENV_FILE, env_key, iframe_src)
+        print(f"✓ Saved to {ENV_FILE} as {env_key}")
 
         await browser.close()
 
