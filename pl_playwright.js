@@ -1,9 +1,9 @@
-const { test } = require('@playwright/test');
+import { test } from '@playwright/test';
 
-test('Open intranet URL', async ({ page }) => {
-    await page.goto('http://rdb/#/', {
-        waitUntil: 'domcontentloaded'
-    });
+test('Open intranet SPA correctly', async ({ page }) => {
+  await page.goto('http://rdb/#/', {
+    waitUntil: 'networkidle'
+  });
 
-    await page.waitForTimeout(5000);
+  await page.waitForTimeout(5000);
 });
