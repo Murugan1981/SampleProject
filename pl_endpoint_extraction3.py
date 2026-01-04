@@ -7,7 +7,6 @@ from playwright.async_api import async_playwright
 # -------------------- CONFIG --------------------
 load_dotenv()
 
-BASE_URL = "http://rdb"
 ENV_FILE = ".env"
 CONFIG_FILE = os.path.join("shared", "input", "ApiTestData.json")
 
@@ -31,16 +30,24 @@ def load_config():
     return config
 
 
-# -------------------- MAIN FLOW --------------------
-async def run():
-    # Load configuration
-    config = load_config()
+# -------------------- EXTRACT IFRAME SRC --------------------
+async def extract_iframe_src(base_url, config, env_type):
+    """
+    Extract iframe src from the RDB UI
     
+    Args:
+        base_url: Base URL for navigation
+        config: Configuration dictionary from JSON
+        env_type: Either 'source' or 'target'
+    """
     system = config['System']
-    env_target = config['Env_Target']
-    env_source = config['Env_Source']
+    env = config['Env_Source'] if env_type == 'source' else config['Env_Target']
     region = config['Region']
     url_type = config['URLTYPE']
+    
+    print(f"\n{'='*60}")
+    print(f"Processing {env_type.upper()} Environment: {env}")
+    print(f"{'='*60}\n")
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
@@ -48,7 +55,7 @@ async def run():
         page = await context.new_page()
 
         # -------- UI NAVIGATION --------
-        await page.goto(BASE_URL, wait_until="domcontentloaded")
+        await page.goto(base_url, wait_until="domcontentloaded")
         await page.wait_for_timeout(4000)
 
         # Select Region
@@ -60,7 +67,7 @@ async def run():
         await page.get_by_role("option", name=system).click()
         
         # Select Environment
-        button_text = f"{system} | {env_target} | {region}"
+        button_text = f"{system} | {env} | {region}"
         await page.get_by_role("button", name=button_text).click()
         
         # Navigate to Service based on URLTYPE
@@ -68,7 +75,7 @@ async def run():
         await page.get_by_role("link", name=service_name).click()
         await page.get_by_role("link", name=service_name).press("NumLock")
         
-        # -------- WAIT FOR IFRAME (FIXED) --------
+        # -------- WAIT FOR IFRAME --------
         try:
             # Wait for iframe element to be present in DOM
             await page.wait_for_selector("iframe", timeout=15000, state="attached")
@@ -91,8 +98,8 @@ async def run():
                 if not os.path.exists(ENV_FILE):
                     open(ENV_FILE, "w").close()
 
-                # Save with dynamic key: {System}_{Region}_{Env_Target}_{Env_Source}
-                env_key = f"{system}_{region}_{env_target}_{env_source}"
+                # Save with dynamic key: {System}_{Region}_{Env}_{EnvType}
+                env_key = f"{system}_{region}_{env}_{env_type.upper()}"
                 set_key(ENV_FILE, env_key, iframe_src)
                 
                 print(f"\n{'='*60}")
@@ -101,99 +108,76 @@ async def run():
                 print(f"  Value: {iframe_src}")
                 print(f"{'='*60}\n")
                 
-                # Stop here as requested
                 await browser.close()
-                return
+                return iframe_src
             
         except Exception as e:
             print(f"Error waiting for iframe: {e}")
             # Take screenshot for debugging
-            await page.screenshot(path="debug_iframe_error.png")
+            await page.screenshot(path=f"debug_iframe_error_{env_type}.png")
             await browser.close()
             raise
 
-        # -------- RESOLVE SWAGGER URL (FIXED) --------
-        try:
-            # Use frame_locator
-            iframe = page.frame_locator("iframe")
-            
-            # Wait for the code element containing the URL
-            code_locator = iframe.locator("code").filter(has_text="http").first
-            await code_locator.wait_for(timeout=10000, state="visible")
-            
-            swagger_url = await code_locator.inner_text()
-            
-            if not swagger_url:
-                raise Exception("Swagger URL not found in iframe")
-            
-            print(f"✓ Swagger URL extracted: {swagger_url}")
-            
-        except Exception as e:
-            print(f"Error extracting Swagger URL: {e}")
-            
-            # Fallback: Try using frames() method
-            try:
-                print("Attempting fallback method...")
-                frames = page.frames
-                print(f"Total frames found: {len(frames)}")
-                
-                for idx, frame in enumerate(frames):
-                    print(f"Frame {idx}: {frame.url}")
-                    
-                    # Skip main frame
-                    if frame == page.main_frame:
-                        continue
-                    
-                    # Try to find code element in this frame
-                    try:
-                        code_elements = await frame.query_selector_all("code")
-                        for code in code_elements:
-                            text = await code.inner_text()
-                            if "http" in text:
-                                swagger_url = text.strip()
-                                print(f"✓ Found URL in frame {idx}: {swagger_url}")
-                                break
-                        
-                        if swagger_url:
-                            break
-                    except:
-                        continue
-                
-                if not swagger_url:
-                    raise Exception("Could not find Swagger URL using fallback method")
-                    
-            except Exception as fallback_error:
-                print(f"Fallback method failed: {fallback_error}")
-                await page.screenshot(path="debug_final_error.png")
-                raise
-
-        # -------- SAVE TO .env --------
-        if not os.path.exists(ENV_FILE):
-            open(ENV_FILE, "w").close()
-
-        # Save with dynamic key: {System}_{Region}_{Env_Target}_{Env_Source}
-        env_key = f"{system}_{region}_{env_target}_{env_source}"
-        set_key(ENV_FILE, env_key, iframe_src)
-        
-        print(f"\n{'='*60}")
-        print(f"✓ Saved to {ENV_FILE}")
-        print(f"  Variable: {env_key}")
-        print(f"  Value: {iframe_src}")
-        print(f"{'='*60}\n")
-
         await browser.close()
+        return None
 
-    # -------- EXTRACT ENDPOINTS --------
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
-    df = await process_environment("SOURCE", swagger_url)
-
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="ENDPOINTS", index=False)
+# -------------------- PROCESS SOURCE --------------------
+async def process_source(base_url, config):
+    """
+    Process SOURCE (Production) environment
     
-    print(f"✓ Endpoints saved to {OUTPUT_FILE}")
+    Args:
+        base_url: Base URL from SOURCE_BASE_URL in .env
+        config: Configuration dictionary
+    """
+    pass
+
+
+# -------------------- PROCESS TARGET --------------------
+async def process_target(base_url, config):
+    """
+    Process TARGET (Testing) environment
+    
+    Args:
+        base_url: Base URL from TARGET_BASE_URL in .env
+        config: Configuration dictionary
+    """
+    pass
+
+
+# -------------------- MAIN --------------------
+async def main():
+    """Main execution flow"""
+    # Load configuration
+    config = load_config()
+    
+    # Load base URLs from .env
+    load_dotenv()
+    source_base_url = os.getenv("SOURCE_BASE_URL")
+    target_base_url = os.getenv("TARGET_BASE_URL")
+    
+    if not source_base_url:
+        raise ValueError("SOURCE_BASE_URL not found in .env file")
+    if not target_base_url:
+        raise ValueError("TARGET_BASE_URL not found in .env file")
+    
+    print(f"\n{'='*60}")
+    print(f"SOURCE_BASE_URL: {source_base_url}")
+    print(f"TARGET_BASE_URL: {target_base_url}")
+    print(f"{'='*60}\n")
+    
+    # Process SOURCE environment
+    print("\n🔵 Starting SOURCE environment processing...")
+    await process_source(source_base_url, config)
+    
+    # Process TARGET environment
+    print("\n🟢 Starting TARGET environment processing...")
+    await process_target(target_base_url, config)
+    
+    print("\n✅ All environments processed successfully!")
 
 
 # -------------------- ENTRY POINT --------------------
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main())
