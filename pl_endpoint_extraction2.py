@@ -133,15 +133,19 @@ async def run():
             if iframe_element:
                 # Wait for iframe to have a valid src
                 iframe_src = await iframe_element.get_attribute("src")
-                print(f"✓ Iframe src: {iframe_src}")
+                print(f"\n{'='*60}")
+                print(f"IFRAME SRC: {iframe_src}")
+                print(f"{'='*60}\n")
                 
-                # Wait for iframe content to be loaded
-                await page.wait_for_load_state("networkidle", timeout=10000)
+                # Stop here as requested
+                await browser.close()
+                return
             
         except Exception as e:
             print(f"Error waiting for iframe: {e}")
             # Take screenshot for debugging
             await page.screenshot(path="debug_iframe_error.png")
+            await browser.close()
             raise
 
         # -------- RESOLVE SWAGGER URL (FIXED) --------
