@@ -131,7 +131,86 @@ async def process_source(base_url, config):
         base_url: Base URL from SOURCE_BASE_URL in .env
         config: Configuration dictionary
     """
-    pass
+    system = config['System']
+    env_source = config['Env_Source']
+    region = config['Region']
+    url_type = config['URLTYPE']
+    
+    print(f"\n{'='*60}")
+    print(f"Processing SOURCE Environment: {env_source}")
+    print(f"{'='*60}\n")
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        # -------- UI NAVIGATION FOR SOURCE --------
+        await page.goto(base_url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(4000)
+
+        # Select Region
+        await page.get_by_text(region, exact=True).click()
+        
+        # Select System
+        await page.get_by_text("Select system...").click()
+        await page.get_by_role("searchbox", name="Filter").fill(system.lower())
+        await page.get_by_role("option", name=system).click()
+        
+        # Select Environment
+        button_text = f"{system} | {env_source} | {region}"
+        await page.get_by_role("button", name=button_text).click()
+        
+        # Navigate to Service based on URLTYPE
+        service_name = "Data Service" if url_type == "DATASERVICE" else url_type
+        await page.get_by_role("link", name=service_name).click()
+        await page.get_by_role("link", name=service_name).press("NumLock")
+        
+        # -------- WAIT FOR IFRAME --------
+        try:
+            # Wait for iframe element to be present in DOM
+            await page.wait_for_selector("iframe", timeout=15000, state="attached")
+            print("✓ Iframe found in DOM")
+            
+            # Additional wait for iframe content to load
+            await page.wait_for_timeout(2000)
+            
+            # Get the iframe element
+            iframe_element = await page.query_selector("iframe")
+            
+            if iframe_element:
+                # Wait for iframe to have a valid src
+                iframe_src = await iframe_element.get_attribute("src")
+                print(f"\n{'='*60}")
+                print(f"IFRAME SRC: {iframe_src}")
+                print(f"{'='*60}\n")
+                
+                # -------- SAVE TO .env --------
+                if not os.path.exists(ENV_FILE):
+                    open(ENV_FILE, "w").close()
+
+                # Save with dynamic key: {System}_{Region}_{Env_Source}_SOURCE
+                env_key = f"{system}_{region}_{env_source}_SOURCE"
+                set_key(ENV_FILE, env_key, iframe_src)
+                
+                print(f"\n{'='*60}")
+                print(f"✓ Saved to {ENV_FILE}")
+                print(f"  Variable: {env_key}")
+                print(f"  Value: {iframe_src}")
+                print(f"{'='*60}\n")
+                
+                await browser.close()
+                return iframe_src
+            
+        except Exception as e:
+            print(f"Error waiting for iframe: {e}")
+            # Take screenshot for debugging
+            await page.screenshot(path="debug_iframe_error_source.png")
+            await browser.close()
+            raise
+
+        await browser.close()
+        return None
 
 
 # -------------------- PROCESS TARGET --------------------
@@ -143,7 +222,86 @@ async def process_target(base_url, config):
         base_url: Base URL from TARGET_BASE_URL in .env
         config: Configuration dictionary
     """
-    pass
+    system = config['System']
+    env_target = config['Env_Target']
+    region = config['Region']
+    url_type = config['URLTYPE']
+    
+    print(f"\n{'='*60}")
+    print(f"Processing TARGET Environment: {env_target}")
+    print(f"{'='*60}\n")
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        # -------- UI NAVIGATION FOR TARGET --------
+        await page.goto(base_url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(4000)
+
+        # Select Region
+        await page.get_by_text(region, exact=True).click()
+        
+        # Select System
+        await page.get_by_text("Select system...").click()
+        await page.get_by_role("searchbox", name="Filter").fill(system.lower())
+        await page.get_by_role("option", name=system).click()
+        
+        # Select Environment
+        button_text = f"{system} | {env_target} | {region}"
+        await page.get_by_role("button", name=button_text).click()
+        
+        # Navigate to Service based on URLTYPE
+        service_name = "Data Service" if url_type == "DATASERVICE" else url_type
+        await page.get_by_role("link", name=service_name).click()
+        await page.get_by_role("link", name=service_name).press("NumLock")
+        
+        # -------- WAIT FOR IFRAME --------
+        try:
+            # Wait for iframe element to be present in DOM
+            await page.wait_for_selector("iframe", timeout=15000, state="attached")
+            print("✓ Iframe found in DOM")
+            
+            # Additional wait for iframe content to load
+            await page.wait_for_timeout(2000)
+            
+            # Get the iframe element
+            iframe_element = await page.query_selector("iframe")
+            
+            if iframe_element:
+                # Wait for iframe to have a valid src
+                iframe_src = await iframe_element.get_attribute("src")
+                print(f"\n{'='*60}")
+                print(f"IFRAME SRC: {iframe_src}")
+                print(f"{'='*60}\n")
+                
+                # -------- SAVE TO .env --------
+                if not os.path.exists(ENV_FILE):
+                    open(ENV_FILE, "w").close()
+
+                # Save with dynamic key: {System}_{Region}_{Env_Target}_TARGET
+                env_key = f"{system}_{region}_{env_target}_TARGET"
+                set_key(ENV_FILE, env_key, iframe_src)
+                
+                print(f"\n{'='*60}")
+                print(f"✓ Saved to {ENV_FILE}")
+                print(f"  Variable: {env_key}")
+                print(f"  Value: {iframe_src}")
+                print(f"{'='*60}\n")
+                
+                await browser.close()
+                return iframe_src
+            
+        except Exception as e:
+            print(f"Error waiting for iframe: {e}")
+            # Take screenshot for debugging
+            await page.screenshot(path="debug_iframe_error_target.png")
+            await browser.close()
+            raise
+
+        await browser.close()
+        return None
 
 
 # -------------------- MAIN --------------------
