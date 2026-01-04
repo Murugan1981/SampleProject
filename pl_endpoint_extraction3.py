@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import pandas as pd
 from dotenv import load_dotenv, set_key
 from playwright.async_api import async_playwright
 
@@ -11,14 +10,6 @@ load_dotenv()
 BASE_URL = "http://rdb"
 ENV_FILE = ".env"
 CONFIG_FILE = os.path.join("shared", "input", "ApiTestData.json")
-
-OUTPUT_FILE = os.path.join("API", "reports", "endpoints.xlsx")
-
-GET_BLOCK_SELECTOR = "div.opblock.opblock-get"
-PATH_SELECTOR = ".opblock-summary-path"
-PARAM_ROW_SELECTOR = "tr"
-PARAM_NAME_SELECTOR = ".parameter__name"
-PARAM_ENUM_SELECTOR = ".parameter__enum"
 
 
 # -------------------- LOAD CONFIG --------------------
@@ -38,87 +29,6 @@ def load_config():
     print(f"  URLTYPE: {config['URLTYPE']}")
     
     return config
-
-
-# -------------------- SWAGGER EXTRACTION --------------------
-async def extract_endpoints(page):
-    results = []
-
-    # Ensure tags are rendered
-    await page.wait_for_selector("h4[id^='operations-tag'] span", timeout=10000)
-
-    get_blocks = await page.query_selector_all(GET_BLOCK_SELECTOR)
-    print(f"Found {len(get_blocks)} GET endpoints")
-
-    for block in get_blocks:
-        try:
-            # Expand GET block
-            await block.click()
-            await page.wait_for_timeout(300)
-
-            # Endpoint path
-            path_el = await block.query_selector(PATH_SELECTOR)
-            endpoint = (await path_el.inner_text()).strip() if path_el else ""
-
-            # -------- TAG EXTRACTION (FIXED) --------
-            tag_el = await block.query_selector(
-                "xpath=ancestor::div[contains(@class,'opblock-tag-section')]"
-                "//h4[contains(@id,'operations-tag')]//span"
-            )
-            tag = (await tag_el.inner_text()).strip() if tag_el else "UNKNOWN"
-
-            # -------- PARAMETER EXTRACTION --------
-            parameters = {}
-
-            rows = await block.query_selector_all(PARAM_ROW_SELECTOR)
-            for row in rows:
-                name_el = await row.query_selector(PARAM_NAME_SELECTOR)
-                enum_el = await row.query_selector(PARAM_ENUM_SELECTOR)
-
-                if not name_el:
-                    continue
-
-                param_name = (await name_el.inner_text()).strip()
-
-                if enum_el:
-                    values = (
-                        await enum_el.inner_text()
-                    ).replace("Available values:", "").strip()
-                else:
-                    values = ""
-
-                parameters[param_name] = values
-
-            # -------- ROW OUTPUT --------
-            row = {
-                "tag": tag,
-                "method": "GET",
-                "endpoint": endpoint
-            }
-
-            row.update(parameters)
-            results.append(row)
-
-        except Exception as e:
-            print(f"Skipped endpoint due to error: {e}")
-
-    return results
-
-
-# -------------------- PROCESS ENV --------------------
-async def process_environment(env_name, swagger_url):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-
-        await page.goto(swagger_url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
-
-        data = await extract_endpoints(page)
-
-        await browser.close()
-        return pd.DataFrame(data)
 
 
 # -------------------- MAIN FLOW --------------------
