@@ -1,110 +1,120 @@
-import asyncio
-import json
 import os
-from dotenv import load_dotenv
+import json
+import asyncio
+from dotenv import load_dotenv, set_key
 from playwright.async_api import async_playwright
 
-# Load environment variables
+# ----------------------- Load env -----------------------
 load_dotenv()
 
-API_TESTDATA_FILE = "shared/input/ApiTestData.json"
+SOURCE_BASE_URL = os.getenv("SOURCE_BASE_URL")
+TARGET_BASE_URL = os.getenv("TARGET_BASE_URL")
+
 ENV_FILE = ".env"
+TESTDATA_FILE = os.path.join("shared", "input", "ApiTestData.json")
 
-# Utility to cleanly set env key-value pairs
-def set_env_key_clean(key, value, env_path=".env"):
-    lines = []
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
 
-    key_found = False
-    with open(env_path, "w", encoding="utf-8") as f:
-        for line in lines:
-            if line.startswith(f"{key}="):
-                f.write(f"{key}={value}\n")
-                key_found = True
-            else:
-                f.write(line)
-        if not key_found:
-            f.write(f"{key}={value}\n")
+# ----------------------- Load config -----------------------
+def load_config():
+    if not os.path.exists(TESTDATA_FILE):
+        raise FileNotFoundError(f"Config file not found: {TESTDATA_FILE}")
+    with open(TESTDATA_FILE, "r") as f:
+        config = json.load(f)
+    return config
 
-# Load API test data
-with open(API_TESTDATA_FILE, "r") as f:
-    apidata = json.load(f)
 
-system = apidata.get("System")
-region = apidata.get("Region")
-urltype = apidata.get("URLTYPE")
-env_source = apidata.get("Env_Source")
-env_target = apidata.get("Env_Target")
+# ----------------------- Extract env URL -----------------------
+async def extract_env_url(page, base_url, system, region, env, urltype, is_source):
+    await page.goto(f"{base_url}/#/", wait_until="domcontentloaded")
+    await page.wait_for_timeout(3000)
 
-source_dashboard = os.getenv("SOURCE_DASHBOARD")
-target_dashboard = os.getenv("TARGET_DASHBOARD")
+    print(f"\nNavigating to {env} > {system} > {region} > {urltype}")
 
-# Main scraping function
-async def extract_env_url(dashboard_url, system):
+    try:
+        # Select System Dropdown
+        await page.get_by_role("button", name="Select").click()
+        await page.get_by_role("searchbox", name="Filter").fill(system.lower())
+        await page.get_by_text(system, exact=True).click()
+
+        # Select Region
+        await page.get_by_role("radio", name=region).check()
+
+        # Click Env Button
+        button_text = f"{system} | {env} | {region}"
+        await page.get_by_role("button", name=button_text).click()
+
+        # Click on DataService / URLType
+        service_name = "Data Service" if urltype.upper() == "DATASERVICE" else urltype
+
+        # 🧠 Wait for the link to appear, timeout after 10s
+        await page.wait_for_selector(f'a[role="link"]:has-text("{service_name}")', timeout=10000)
+        await page.get_by_role("link", name=service_name).click()
+
+        # Wait for iframe and extract
+        await page.wait_for_selector("iframe", timeout=15000)
+        iframe_element = await page.query_selector("iframe")
+        if iframe_element:
+            iframe_src = await iframe_element.get_attribute("src")
+            print(f"✅ Extracted iframe URL → {iframe_src}")
+
+            # Save to .env (remove quotes manually)
+            env_key = f"{system}_{region}_{env}"
+            clean_url = iframe_src.replace("'", "").strip()
+            set_key(ENV_FILE, env_key, clean_url)
+            print(f"🔐 Saved in .env: {env_key} = {clean_url}")
+            return iframe_src
+        else:
+            print("❌ iframe not found")
+    except Exception as e:
+        print(f"🔥 Error extracting env URL: {e}")
+        return None
+
+
+# ----------------------- Source + Target -----------------------
+async def process_source(config):
+    print("\n🌍 Processing SOURCE")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-        await page.goto(dashboard_url)
-        await page.wait_for_timeout(2000)
+        page = await browser.new_page()
+        await extract_env_url(
+            page,
+            SOURCE_BASE_URL,
+            config["System"],
+            config["Region"],
+            config["Env_Source"],
+            config["URLTYPE"],
+            is_source=True
+        )
+        await browser.close()
 
-        # Select region
-        await page.get_by_role("radio", name=region).check()
-        await page.wait_for_timeout(1000)
 
-        # Select system from dropdown
-        await page.get_by_role("combobox").click()
-        await page.get_by_role("option", name=system).click()
-        await page.wait_for_timeout(1000)
+async def process_target(config):
+    print("\n🌍 Processing TARGET")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        page = await browser.new_page()
+        await extract_env_url(
+            page,
+            TARGET_BASE_URL,
+            config["System"],
+            config["Region"],
+            config["Env_Target"],
+            config["URLTYPE"],
+            is_source=False
+        )
+        await browser.close()
 
-        # Click DataService link
-        await page.get_by_role("link", name=urltype).click()
-        await page.wait_for_timeout(2000)
 
-        # Click first GET button and "Try it out"
-        await page.locator(".opblock-get").first.click()
-        await page.get_by_role("button", name="Try it out").click()
-        await page.wait_for_timeout(1000)
-
-        # Fill inputs if needed (optional, based on UI behavior)
-
-        # Execute the call
-        await page.get_by_role("button", name="Execute").click()
-        await page.wait_for_timeout(3000)
-
-        # Extract the request URL
-        try:
-            request_url = await page.locator(".request-url").text_content()
-            return request_url
-        except:
-            return None
-
-# Extract base URL
-async def process_source():
-    url = await extract_env_url(source_dashboard, system)
-    if url:
-        if "?" in url:
-            base = url.split("?")[0].rsplit("/", 1)[0]
-        else:
-            base = url.rsplit("/", 1)[0]
-        set_env_key_clean(f"{system}_{region}_{env_source}", base)
-        print(f"✅ Source env saved: {base}")
-
-async def process_target():
-    url = await extract_env_url(target_dashboard, system)
-    if url:
-        if "?" in url:
-            base = url.split("?")[0].rsplit("/", 1)[0]
-        else:
-            base = url.rsplit("/", 1)[0]
-        set_env_key_clean(f"{system}_{region}_{env_target}", base)
-        print(f"✅ Target env saved: {base}")
-
+# ----------------------- MAIN -----------------------
 async def main():
-    await process_source()
-    await process_target()
+    config = load_config()
+    print(f"\nLoaded config → System: {config['System']} | Region: {config['Region']} | Source: {config['Env_Source']} | Target: {config['Env_Target']}")
+
+    await process_source(config)
+    await process_target(config)
+
+    print("\n✅ All environments processed successfully!")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
