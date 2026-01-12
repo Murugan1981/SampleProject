@@ -1,15 +1,18 @@
 # script2_recreate_crif_ird.py
+# -------------------------------------------------
+# Re-create CRIF_LDN_IRD_YYYYMMDD.csv (QA version)
+# -------------------------------------------------
 
 import os
 import json
 import time
+import re
 from pathlib import Path
 import pandas as pd
 import requests
-from dotenv import load_dotenv
 from requests_ntlm import HttpNtlmAuth
 import urllib3
-import re
+from auth import get_password   # <-- as requested
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -26,7 +29,7 @@ OUTPUT_FILE = BASE_DIR / "CRIF_LDN_IRD_20251128_QA.csv"
 CDW_CACHE_FILE = BASE_DIR / "cdw_cache.json"
 
 # ============================================================
-# CONSTANTS
+# RULES / CONSTANTS
 # ============================================================
 ALLOWED_IRD_SENSITIVITIES = {
     "Risk_IRVol",
@@ -41,10 +44,9 @@ CONST_IM_MODEL = "SIMM"
 CONST_PRODUCT_CLASS = "RatesFX"
 
 # ============================================================
-# SIMM COLUMN NAMES
+# SIMM COLUMN NAMES (FIXED ONCE FOUND)
 # ============================================================
 SIMM_COL_TRADE_ID = "TRADE_ID"
-SIMM_COL_PRODUCT_FAMILY = "MUREXPRODUCTFAMILY"
 SIMM_COL_SENSITIVITY = "Sensitivity"
 SIMM_COL_QUALIFIER = "Qualifier"
 SIMM_COL_BUCKET = "Bucket"
@@ -56,6 +58,17 @@ SIMM_COL_VALUE_USD = "ValueUSD"
 SIMM_COL_PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 SIMM_COL_CP_JOIN_KEY = "CP_ID"
 
+PRODUCT_FAMILY_CANDIDATES = [
+    "MUREXPRODUCTFAMILY",
+    "MurexProductFamily",
+    "PRODUCTFAMILY",
+    "ProductFamily",
+    "MUREX_PRODUCT_FAMILY"
+]
+
+# ============================================================
+# PV FILE
+# ============================================================
 PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 PV_VALUE_COL = "PV"
 
@@ -67,7 +80,7 @@ INTRADAY_URL = CDW_BASE + "/fpml/intradayTrades/{trade_id}"
 LEGAL_ENTITY_URL = CDW_BASE + "/common/legalEntityClients/{party_id}/"
 
 # ============================================================
-# OUTPUT COLUMNS
+# OUTPUT LAYOUT
 # ============================================================
 OUTPUT_COLUMNS = [
     "TRADE_ID", "PARTY_ID", "CP_ID", "IM_MODEL", "PRODUCT_CLASS",
@@ -83,7 +96,7 @@ OUTPUT_COLUMNS = [
 # UTILS
 # ============================================================
 def norm(x):
-    if pd.isna(x) or x is None:
+    if x is None or pd.isna(x):
         return ""
     return str(x).strip()
 
@@ -94,15 +107,14 @@ def normalize_date(x):
         return ""
 
 # ============================================================
-# AUTH
+# AUTH (AS REQUESTED)
 # ============================================================
 def get_auth():
-    load_dotenv()
-    user = os.getenv("USERNAME")
-    pwd = os.getenv("PASSWORD")
-    if not user or not pwd:
-        raise RuntimeError("USERNAME / PASSWORD not found")
-    return HttpNtlmAuth(user, pwd)
+    username = os.getenv("USERNAME")
+    password = get_password()
+    if not username or not password:
+        raise RuntimeError("USERNAME or PASSWORD missing")
+    return HttpNtlmAuth(username, password)
 
 # ============================================================
 # CDW CACHE
@@ -120,12 +132,16 @@ def save_cache(cache):
 # ============================================================
 def parse_intraday(xml):
     trade_date = re.search(r"<tradeDate>(.*?)</tradeDate>", xml)
-    adj_date = re.search(r"<adjustedDate>(.*?)</adjustedDate>", xml)
-    party = re.search(r'<party id="COUNTERPARTY">.*?<partyId.*?>(.*?)</partyId>', xml, re.S)
+    end_date = re.search(r"<adjustedDate>(.*?)</adjustedDate>", xml)
+    party = re.search(
+        r'<party id="COUNTERPARTY">.*?<partyId.*?>(.*?)</partyId>',
+        xml,
+        re.S
+    )
 
     return (
         trade_date.group(1) if trade_date else "",
-        adj_date.group(1) if adj_date else "",
+        end_date.group(1) if end_date else "",
         party.group(1) if party else ""
     )
 
@@ -137,7 +153,7 @@ def parse_ccif(xml):
 # MAIN
 # ============================================================
 def main():
-    print("Starting Script 2")
+    print("Starting Script 2 – Recreate CRIF_LDN_IRD")
 
     # ---------- LOAD FILES (SAFE DECODING) ----------
     with open(SIMM_FILE, "r", encoding="cp1252", errors="replace") as f:
@@ -149,9 +165,21 @@ def main():
     with open(CSA_FILE, "r", encoding="cp1252", errors="replace") as f:
         csa = pd.read_csv(f, dtype=str)
 
+    # ---------- FIND PRODUCT FAMILY COLUMN ----------
+    product_family_col = None
+    for c in PRODUCT_FAMILY_CANDIDATES:
+        if c in simm.columns:
+            product_family_col = c
+            break
+
+    if not product_family_col:
+        raise RuntimeError(
+            f"Product family column not found. Available columns:\n{simm.columns.tolist()}"
+        )
+
     # ---------- FILTER IRD ----------
     simm = simm[
-        (simm[SIMM_COL_PRODUCT_FAMILY] == "IRD") &
+        (simm[product_family_col].map(norm).str.upper() == "IRD") &
         (simm[SIMM_COL_SENSITIVITY].isin(ALLOWED_IRD_SENSITIVITIES))
     ].copy()
 
@@ -164,12 +192,14 @@ def main():
     out["PRODUCT_CLASS"] = CONST_PRODUCT_CLASS
     out["TRADE_DATE"] = ""
     out["END_DATE"] = ""
+
     out["PRODUCT_TYPE"] = ""
     out["NOTIONAL"] = ""
     out["TRADE_CURRENCY"] = ""
     out["NOTIONAL2"] = ""
     out["TRADE_CURRENCY2"] = ""
     out["VALUATION_DATE"] = ""
+
     out["PV"] = ""
     out["RISK_TYPE"] = simm[SIMM_COL_SENSITIVITY].map(norm)
     out["QUALIFIER"] = simm[SIMM_COL_QUALIFIER].map(norm)
@@ -179,6 +209,7 @@ def main():
     out["AMOUNT"] = simm[SIMM_COL_VALUE].map(norm)
     out["AMOUNT_CURRENCY"] = simm[SIMM_COL_CURRENCY].map(norm)
     out["AMOUNT_USD"] = simm[SIMM_COL_VALUE_USD].map(norm)
+
     out["MASTER_CURRENCY"] = ""
     out["MASTER_AMOUNT"] = ""
     out["C_CIF"] = ""
@@ -193,16 +224,24 @@ def main():
 
     for trade_id in out["TRADE_ID"].unique():
         if trade_id not in cache["intraday"]:
-            xml = requests.get(INTRADAY_URL.format(trade_id=trade_id),
-                               auth=auth, verify=False).text
+            xml = requests.get(
+                INTRADAY_URL.format(trade_id=trade_id),
+                auth=auth,
+                verify=False
+            ).text
+
             td, ed, party_id = parse_intraday(xml)
             cache["intraday"][trade_id] = (td, ed, party_id)
 
             ccif = ""
             if party_id:
-                xml2 = requests.get(LEGAL_ENTITY_URL.format(party_id=party_id),
-                                    auth=auth, verify=False).text
+                xml2 = requests.get(
+                    LEGAL_ENTITY_URL.format(party_id=party_id),
+                    auth=auth,
+                    verify=False
+                ).text
                 ccif = parse_ccif(xml2)
+
             cache["ccif"][party_id] = ccif
             time.sleep(0.05)
 
@@ -213,10 +252,11 @@ def main():
 
     save_cache(cache)
 
+    # ---------- WRITE OUTPUT ----------
     out = out[OUTPUT_COLUMNS]
     out.to_csv(OUTPUT_FILE, index=False, encoding="utf-8")
 
-    print(f"Generated: {OUTPUT_FILE}")
+    print(f"Generated file: {OUTPUT_FILE}")
     print("Script 2 completed successfully")
 
 if __name__ == "__main__":
