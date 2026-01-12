@@ -1,24 +1,26 @@
 # script2_recreate_crif_ird.py
-# -------------------------------------------------
-# Re-create CRIF_LDN_IRD_YYYYMMDD.csv (QA version)
-# -------------------------------------------------
+# -------------------------------------------------------
+# Re-create CRIF_LDN_IRD_YYYYMMDD.csv from SIMM + PV + CSA
+# -------------------------------------------------------
 
 import os
 import json
 import time
 import re
 from pathlib import Path
+
 import pandas as pd
 import requests
 from requests_ntlm import HttpNtlmAuth
 import urllib3
+
 from auth import get_password   # <-- as requested
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============================================================
-# HARD-CODED PATHS
-# ============================================================
+# =======================================================
+# HARD-CODED FILE PATHS (NO AUTO-DETECTION)
+# =======================================================
 BASE_DIR = Path(r"H:\LDNM1\SIMM\Final")
 
 SIMM_FILE = BASE_DIR / "MHBK_Sensitivities_20251128.txt"
@@ -28,9 +30,9 @@ CSA_FILE  = BASE_DIR / "CSA_COUNTERPARTY_INFO_ALL_20251128.csv"
 OUTPUT_FILE = BASE_DIR / "CRIF_LDN_IRD_20251128_QA.csv"
 CDW_CACHE_FILE = BASE_DIR / "cdw_cache.json"
 
-# ============================================================
-# RULES / CONSTANTS
-# ============================================================
+# =======================================================
+# IRD RULES
+# =======================================================
 ALLOWED_IRD_SENSITIVITIES = {
     "Risk_IRVol",
     "Risk_Inflation",
@@ -43,9 +45,9 @@ CONST_PARTY_ID = "MIZBK"
 CONST_IM_MODEL = "SIMM"
 CONST_PRODUCT_CLASS = "RatesFX"
 
-# ============================================================
-# SIMM COLUMN NAMES (FIXED ONCE FOUND)
-# ============================================================
+# =======================================================
+# SIMM COLUMN NAMES (CONFIRMED SET)
+# =======================================================
 SIMM_COL_TRADE_ID = "TRADE_ID"
 SIMM_COL_SENSITIVITY = "Sensitivity"
 SIMM_COL_QUALIFIER = "Qualifier"
@@ -58,30 +60,22 @@ SIMM_COL_VALUE_USD = "ValueUSD"
 SIMM_COL_PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 SIMM_COL_CP_JOIN_KEY = "CP_ID"
 
-PRODUCT_FAMILY_CANDIDATES = [
-    "MUREXPRODUCTFAMILY",
-    "MurexProductFamily",
-    "PRODUCTFAMILY",
-    "ProductFamily",
-    "MUREX_PRODUCT_FAMILY"
-]
-
-# ============================================================
+# =======================================================
 # PV FILE
-# ============================================================
+# =======================================================
 PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 PV_VALUE_COL = "PV"
 
-# ============================================================
+# =======================================================
 # CDW CONFIG
-# ============================================================
+# =======================================================
 CDW_BASE = "https://svc-sit6-cdw.uk.mizuho-sc.com/mhbk"
 INTRADAY_URL = CDW_BASE + "/fpml/intradayTrades/{trade_id}"
 LEGAL_ENTITY_URL = CDW_BASE + "/common/legalEntityClients/{party_id}/"
 
-# ============================================================
-# OUTPUT LAYOUT
-# ============================================================
+# =======================================================
+# OUTPUT LAYOUT (NEW CRIF IRD)
+# =======================================================
 OUTPUT_COLUMNS = [
     "TRADE_ID", "PARTY_ID", "CP_ID", "IM_MODEL", "PRODUCT_CLASS",
     "TRADE_DATE", "END_DATE",
@@ -92,9 +86,9 @@ OUTPUT_COLUMNS = [
     "AMOUNT_USD", "MASTER_CURRENCY", "MASTER_AMOUNT", "C_CIF"
 ]
 
-# ============================================================
+# =======================================================
 # UTILS
-# ============================================================
+# =======================================================
 def norm(x):
     if x is None or pd.isna(x):
         return ""
@@ -106,9 +100,9 @@ def normalize_date(x):
     except Exception:
         return ""
 
-# ============================================================
-# AUTH (AS REQUESTED)
-# ============================================================
+# =======================================================
+# AUTH (MATCHES YOUR FRAMEWORK)
+# =======================================================
 def get_auth():
     username = os.getenv("USERNAME")
     password = get_password()
@@ -116,9 +110,9 @@ def get_auth():
         raise RuntimeError("USERNAME or PASSWORD missing")
     return HttpNtlmAuth(username, password)
 
-# ============================================================
+# =======================================================
 # CDW CACHE
-# ============================================================
+# =======================================================
 def load_cache():
     if CDW_CACHE_FILE.exists():
         return json.loads(CDW_CACHE_FILE.read_text())
@@ -127,9 +121,9 @@ def load_cache():
 def save_cache(cache):
     CDW_CACHE_FILE.write_text(json.dumps(cache, indent=2))
 
-# ============================================================
-# CDW PARSERS
-# ============================================================
+# =======================================================
+# CDW XML PARSERS
+# =======================================================
 def parse_intraday(xml):
     trade_date = re.search(r"<tradeDate>(.*?)</tradeDate>", xml)
     end_date = re.search(r"<adjustedDate>(.*?)</adjustedDate>", xml)
@@ -149,13 +143,13 @@ def parse_ccif(xml):
     m = re.search(r'<identifier name="MIZUHO_CCIF_NO">(.*?)</identifier>', xml)
     return m.group(1) if m else ""
 
-# ============================================================
+# =======================================================
 # MAIN
-# ============================================================
+# =======================================================
 def main():
     print("Starting Script 2 – Recreate CRIF_LDN_IRD")
 
-    # ---------- LOAD FILES (SAFE DECODING) ----------
+    # ---------- LOAD FILES (SAFE FOR OLD PANDAS) ----------
     with open(SIMM_FILE, "r", encoding="cp1252", errors="replace") as f:
         simm = pd.read_csv(f, sep="|", dtype=str)
 
@@ -165,23 +159,19 @@ def main():
     with open(CSA_FILE, "r", encoding="cp1252", errors="replace") as f:
         csa = pd.read_csv(f, dtype=str)
 
-    # ---------- FIND PRODUCT FAMILY COLUMN ----------
-    product_family_col = None
-    for c in PRODUCT_FAMILY_CANDIDATES:
-        if c in simm.columns:
-            product_family_col = c
-            break
-
-    if not product_family_col:
+    # ---------- SANITY CHECK ----------
+    if SIMM_COL_SENSITIVITY not in simm.columns:
         raise RuntimeError(
-            f"Product family column not found. Available columns:\n{simm.columns.tolist()}"
+            f"Sensitivity column '{SIMM_COL_SENSITIVITY}' not found.\n"
+            f"Available columns: {simm.columns.tolist()}"
         )
 
-    # ---------- FILTER IRD ----------
+    # ---------- FILTER IRD (CORRECT LOGIC) ----------
     simm = simm[
-        (simm[product_family_col].map(norm).str.upper() == "IRD") &
-        (simm[SIMM_COL_SENSITIVITY].isin(ALLOWED_IRD_SENSITIVITIES))
+        simm[SIMM_COL_SENSITIVITY].map(norm).isin(ALLOWED_IRD_SENSITIVITIES)
     ].copy()
+
+    print(f"IRD rows after filter: {len(simm)}")
 
     # ---------- BUILD OUTPUT ----------
     out = pd.DataFrame()
@@ -193,6 +183,7 @@ def main():
     out["TRADE_DATE"] = ""
     out["END_DATE"] = ""
 
+    # Blank-by-design columns
     out["PRODUCT_TYPE"] = ""
     out["NOTIONAL"] = ""
     out["TRADE_CURRENCY"] = ""
@@ -200,6 +191,7 @@ def main():
     out["TRADE_CURRENCY2"] = ""
     out["VALUATION_DATE"] = ""
 
+    # Risk columns
     out["PV"] = ""
     out["RISK_TYPE"] = simm[SIMM_COL_SENSITIVITY].map(norm)
     out["QUALIFIER"] = simm[SIMM_COL_QUALIFIER].map(norm)
@@ -215,7 +207,10 @@ def main():
     out["C_CIF"] = ""
 
     # ---------- PV JOIN ----------
-    pv_map = dict(zip(pv[PV_JOIN_KEY].map(norm), pv[PV_VALUE_COL].map(norm)))
+    pv_map = dict(zip(
+        pv[PV_JOIN_KEY].map(norm),
+        pv[PV_VALUE_COL].map(norm)
+    ))
     out["PV"] = simm[SIMM_COL_PV_JOIN_KEY].map(norm).map(lambda x: pv_map.get(x, ""))
 
     # ---------- CDW ENRICH ----------
