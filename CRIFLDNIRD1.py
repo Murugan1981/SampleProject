@@ -1,13 +1,9 @@
 # script2_recreate_crif_ird.py
-# -----------------------------------------
-# Re-create CRIF_LDN_IRD_YYYYMMDD.csv
-# -----------------------------------------
 
 import os
 import json
 import time
 from pathlib import Path
-from datetime import datetime
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -27,7 +23,6 @@ PV_FILE   = BASE_DIR / "MHBK_MX_PV_20251128.csv"
 CSA_FILE  = BASE_DIR / "CSA_COUNTERPARTY_INFO_ALL_20251128.csv"
 
 OUTPUT_FILE = BASE_DIR / "CRIF_LDN_IRD_20251128_QA.csv"
-ERROR_FILE  = BASE_DIR / "Script2_Errors.csv"
 CDW_CACHE_FILE = BASE_DIR / "cdw_cache.json"
 
 # ============================================================
@@ -45,8 +40,6 @@ CONST_PARTY_ID = "MIZBK"
 CONST_IM_MODEL = "SIMM"
 CONST_PRODUCT_CLASS = "RatesFX"
 
-DATE_OUTPUT_FORMAT = "%d/%m/%Y"
-
 # ============================================================
 # SIMM COLUMN NAMES
 # ============================================================
@@ -63,9 +56,6 @@ SIMM_COL_VALUE_USD = "ValueUSD"
 SIMM_COL_PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 SIMM_COL_CP_JOIN_KEY = "CP_ID"
 
-# ============================================================
-# PV FILE
-# ============================================================
 PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 PV_VALUE_COL = "PV"
 
@@ -89,13 +79,6 @@ OUTPUT_COLUMNS = [
     "AMOUNT_USD", "MASTER_CURRENCY", "MASTER_AMOUNT", "C_CIF"
 ]
 
-MANDATORY_COLUMNS = [
-    "TRADE_ID", "PARTY_ID", "CP_ID", "IM_MODEL", "PRODUCT_CLASS",
-    "TRADE_DATE", "END_DATE", "PV",
-    "RISK_TYPE", "QUALIFIER", "BUCKET", "LABEL1", "LABEL2",
-    "AMOUNT", "AMOUNT_CURRENCY", "AMOUNT_USD", "C_CIF"
-]
-
 # ============================================================
 # UTILS
 # ============================================================
@@ -106,7 +89,7 @@ def norm(x):
 
 def normalize_date(x):
     try:
-        return pd.to_datetime(x).strftime(DATE_OUTPUT_FORMAT)
+        return pd.to_datetime(x).strftime("%d/%m/%Y")
     except Exception:
         return ""
 
@@ -118,7 +101,7 @@ def get_auth():
     user = os.getenv("USERNAME")
     pwd = os.getenv("PASSWORD")
     if not user or not pwd:
-        raise RuntimeError("USERNAME / PASSWORD not found in environment")
+        raise RuntimeError("USERNAME / PASSWORD not found")
     return HttpNtlmAuth(user, pwd)
 
 # ============================================================
@@ -154,30 +137,17 @@ def parse_ccif(xml):
 # MAIN
 # ============================================================
 def main():
-    print("Starting Script 2 – Recreate CRIF_LDN_IRD")
+    print("Starting Script 2")
 
-    # ---------- LOAD FILES (FIXED ENCODING) ----------
-    simm = pd.read_csv(
-        SIMM_FILE,
-        sep="|",
-        dtype=str,
-        encoding="cp1252",
-        errors="replace"
-    )
+    # ---------- LOAD FILES (SAFE DECODING) ----------
+    with open(SIMM_FILE, "r", encoding="cp1252", errors="replace") as f:
+        simm = pd.read_csv(f, sep="|", dtype=str)
 
-    pv = pd.read_csv(
-        PV_FILE,
-        dtype=str,
-        encoding="cp1252",
-        errors="replace"
-    )
+    with open(PV_FILE, "r", encoding="cp1252", errors="replace") as f:
+        pv = pd.read_csv(f, dtype=str)
 
-    csa = pd.read_csv(
-        CSA_FILE,
-        dtype=str,
-        encoding="cp1252",
-        errors="replace"
-    )
+    with open(CSA_FILE, "r", encoding="cp1252", errors="replace") as f:
+        csa = pd.read_csv(f, dtype=str)
 
     # ---------- FILTER IRD ----------
     simm = simm[
@@ -185,24 +155,21 @@ def main():
         (simm[SIMM_COL_SENSITIVITY].isin(ALLOWED_IRD_SENSITIVITIES))
     ].copy()
 
-    # ---------- BASE OUTPUT ----------
+    # ---------- BUILD OUTPUT ----------
     out = pd.DataFrame()
     out["TRADE_ID"] = simm[SIMM_COL_TRADE_ID].map(norm)
     out["PARTY_ID"] = CONST_PARTY_ID
     out["CP_ID"] = simm[SIMM_COL_CP_JOIN_KEY].map(norm)
     out["IM_MODEL"] = CONST_IM_MODEL
     out["PRODUCT_CLASS"] = CONST_PRODUCT_CLASS
-
     out["TRADE_DATE"] = ""
     out["END_DATE"] = ""
-
     out["PRODUCT_TYPE"] = ""
     out["NOTIONAL"] = ""
     out["TRADE_CURRENCY"] = ""
     out["NOTIONAL2"] = ""
     out["TRADE_CURRENCY2"] = ""
     out["VALUATION_DATE"] = ""
-
     out["PV"] = ""
     out["RISK_TYPE"] = simm[SIMM_COL_SENSITIVITY].map(norm)
     out["QUALIFIER"] = simm[SIMM_COL_QUALIFIER].map(norm)
@@ -212,7 +179,6 @@ def main():
     out["AMOUNT"] = simm[SIMM_COL_VALUE].map(norm)
     out["AMOUNT_CURRENCY"] = simm[SIMM_COL_CURRENCY].map(norm)
     out["AMOUNT_USD"] = simm[SIMM_COL_VALUE_USD].map(norm)
-
     out["MASTER_CURRENCY"] = ""
     out["MASTER_AMOUNT"] = ""
     out["C_CIF"] = ""
@@ -247,11 +213,10 @@ def main():
 
     save_cache(cache)
 
-    # ---------- WRITE OUTPUT ----------
     out = out[OUTPUT_COLUMNS]
     out.to_csv(OUTPUT_FILE, index=False, encoding="utf-8")
 
-    print(f"Generated file: {OUTPUT_FILE}")
+    print(f"Generated: {OUTPUT_FILE}")
     print("Script 2 completed successfully")
 
 if __name__ == "__main__":
