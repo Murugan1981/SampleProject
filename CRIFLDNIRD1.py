@@ -1,6 +1,8 @@
 # script2_recreate_crif_ird.py
 # -------------------------------------------------------
 # Re-create CRIF_LDN_IRD_YYYYMMDD.csv from SIMM + PV + CSA
+# - Silently skips IRD filtering if Sensitivity column
+#   is not present in SIMM file
 # -------------------------------------------------------
 
 import os
@@ -13,6 +15,7 @@ import pandas as pd
 import requests
 from requests_ntlm import HttpNtlmAuth
 import urllib3
+
 from auth import get_password
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -45,7 +48,7 @@ CONST_IM_MODEL = "SIMM"
 CONST_PRODUCT_CLASS = "RatesFX"
 
 # =======================================================
-# SIMM COLUMN NAMES (ONLY APPLY TO SIMM FILE)
+# SIMM COLUMN NAMES (ONLY USED IF PRESENT)
 # =======================================================
 SIMM_COL_TRADE_ID = "TRADE_ID"
 SIMM_COL_SENSITIVITY = "Sensitivity"
@@ -148,7 +151,7 @@ def parse_ccif(xml):
 def main():
     print("Starting Script 2 – Recreate CRIF_LDN_IRD")
 
-    # ---------- LOAD FILES (CLEAR NAMES) ----------
+    # ---------- LOAD FILES (SAFE FOR OLD PANDAS) ----------
     with open(SIMM_FILE, "r", encoding="cp1252", errors="replace") as f:
         simm_df = pd.read_csv(f, sep="|", dtype=str)
 
@@ -158,32 +161,29 @@ def main():
     with open(CSA_FILE, "r", encoding="cp1252", errors="replace") as f:
         csa_df = pd.read_csv(f, dtype=str)
 
-    print(f"SIMM rows loaded: {len(simm_df)}")
-
-    # ---------- VALIDATE SIMM SCHEMA ----------
-    if SIMM_COL_SENSITIVITY not in simm_df.columns:
-        raise RuntimeError(
-            f"Sensitivity column '{SIMM_COL_SENSITIVITY}' not found in SIMM file.\n"
-            f"SIMM columns are:\n{simm_df.columns.tolist()}"
-        )
-
-    # ---------- FILTER IRD (ONLY ON SIMM) ----------
-    simm_ird_df = simm_df[
-        simm_df[SIMM_COL_SENSITIVITY].map(norm).isin(ALLOWED_IRD_SENSITIVITIES)
-    ].copy()
-
-    print(f"IRD rows after sensitivity filter: {len(simm_ird_df)}")
+    # ---------- IRD FILTER (SILENT IF COLUMN MISSING) ----------
+    if SIMM_COL_SENSITIVITY in simm_df.columns:
+        simm_ird_df = simm_df[
+            simm_df[SIMM_COL_SENSITIVITY]
+            .astype(str)
+            .str.strip()
+            .isin(ALLOWED_IRD_SENSITIVITIES)
+        ].copy()
+    else:
+        # Sensitivity column not present → skip IRD filter silently
+        simm_ird_df = simm_df.copy()
 
     # ---------- BUILD OUTPUT ----------
     out = pd.DataFrame()
-    out["TRADE_ID"] = simm_ird_df[SIMM_COL_TRADE_ID].map(norm)
+    out["TRADE_ID"] = simm_ird_df.get(SIMM_COL_TRADE_ID, "").map(norm)
     out["PARTY_ID"] = CONST_PARTY_ID
-    out["CP_ID"] = simm_ird_df[SIMM_COL_CP_JOIN_KEY].map(norm)
+    out["CP_ID"] = simm_ird_df.get(SIMM_COL_CP_JOIN_KEY, "").map(norm)
     out["IM_MODEL"] = CONST_IM_MODEL
     out["PRODUCT_CLASS"] = CONST_PRODUCT_CLASS
     out["TRADE_DATE"] = ""
     out["END_DATE"] = ""
 
+    # Blank-by-design columns
     out["PRODUCT_TYPE"] = ""
     out["NOTIONAL"] = ""
     out["TRADE_CURRENCY"] = ""
@@ -191,15 +191,16 @@ def main():
     out["TRADE_CURRENCY2"] = ""
     out["VALUATION_DATE"] = ""
 
+    # Risk / SIMM columns
     out["PV"] = ""
-    out["RISK_TYPE"] = simm_ird_df[SIMM_COL_SENSITIVITY].map(norm)
-    out["QUALIFIER"] = simm_ird_df[SIMM_COL_QUALIFIER].map(norm)
-    out["BUCKET"] = simm_ird_df[SIMM_COL_BUCKET].map(norm)
-    out["LABEL1"] = simm_ird_df[SIMM_COL_LABEL1].map(norm)
-    out["LABEL2"] = simm_ird_df[SIMM_COL_LABEL2].map(norm)
-    out["AMOUNT"] = simm_ird_df[SIMM_COL_VALUE].map(norm)
-    out["AMOUNT_CURRENCY"] = simm_ird_df[SIMM_COL_CURRENCY].map(norm)
-    out["AMOUNT_USD"] = simm_ird_df[SIMM_COL_VALUE_USD].map(norm)
+    out["RISK_TYPE"] = simm_ird_df.get(SIMM_COL_SENSITIVITY, "").map(norm)
+    out["QUALIFIER"] = simm_ird_df.get(SIMM_COL_QUALIFIER, "").map(norm)
+    out["BUCKET"] = simm_ird_df.get(SIMM_COL_BUCKET, "").map(norm)
+    out["LABEL1"] = simm_ird_df.get(SIMM_COL_LABEL1, "").map(norm)
+    out["LABEL2"] = simm_ird_df.get(SIMM_COL_LABEL2, "").map(norm)
+    out["AMOUNT"] = simm_ird_df.get(SIMM_COL_VALUE, "").map(norm)
+    out["AMOUNT_CURRENCY"] = simm_ird_df.get(SIMM_COL_CURRENCY, "").map(norm)
+    out["AMOUNT_USD"] = simm_ird_df.get(SIMM_COL_VALUE_USD, "").map(norm)
 
     out["MASTER_CURRENCY"] = ""
     out["MASTER_AMOUNT"] = ""
@@ -207,16 +208,21 @@ def main():
 
     # ---------- PV JOIN ----------
     pv_map = dict(zip(
-        pv_df[PV_JOIN_KEY].map(norm),
-        pv_df[PV_VALUE_COL].map(norm)
+        pv_df.get(PV_JOIN_KEY, "").map(norm),
+        pv_df.get(PV_VALUE_COL, "").map(norm)
     ))
-    out["PV"] = simm_ird_df[SIMM_COL_PV_JOIN_KEY].map(norm).map(lambda x: pv_map.get(x, ""))
+    out["PV"] = simm_ird_df.get(SIMM_COL_PV_JOIN_KEY, "").map(norm).map(
+        lambda x: pv_map.get(x, "")
+    )
 
     # ---------- CDW ENRICH ----------
     auth = get_auth()
     cache = load_cache()
 
     for trade_id in out["TRADE_ID"].unique():
+        if not trade_id:
+            continue
+
         if trade_id not in cache["intraday"]:
             xml = requests.get(
                 INTRADAY_URL.format(trade_id=trade_id),
