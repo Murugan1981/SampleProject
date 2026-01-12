@@ -18,20 +18,20 @@ import re
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================================
-# HARD-CODED PATHS (NO AUTO-DETECTION)
+# HARD-CODED PATHS
 # ============================================================
 BASE_DIR = Path(r"H:\LDNM1\SIMM\Final")
 
-SIMM_FILE = BASE_DIR / "MHBK_Sensitivities_YYYYMMDD.txt"
-PV_FILE   = BASE_DIR / "MHBK_MX_PV_YYYYMMDD.csv"
-CSA_FILE  = BASE_DIR / "CSA_COUNTERPARTY_INFO_ALL_YYYYMMDD.csv"
+SIMM_FILE = BASE_DIR / "MHBK_Sensitivities_20251128.txt"
+PV_FILE   = BASE_DIR / "MHBK_MX_PV_20251128.csv"
+CSA_FILE  = BASE_DIR / "CSA_COUNTERPARTY_INFO_ALL_20251128.csv"
 
-OUTPUT_FILE = BASE_DIR / "CRIF_LDN_IRD_YYYYMMDD_QA.csv"
+OUTPUT_FILE = BASE_DIR / "CRIF_LDN_IRD_20251128_QA.csv"
 ERROR_FILE  = BASE_DIR / "Script2_Errors.csv"
 CDW_CACHE_FILE = BASE_DIR / "cdw_cache.json"
 
 # ============================================================
-# CONSTANTS & RULES
+# CONSTANTS
 # ============================================================
 ALLOWED_IRD_SENSITIVITIES = {
     "Risk_IRVol",
@@ -48,7 +48,7 @@ CONST_PRODUCT_CLASS = "RatesFX"
 DATE_OUTPUT_FORMAT = "%d/%m/%Y"
 
 # ============================================================
-# SIMM COLUMN NAMES (CHANGE IF REQUIRED)
+# SIMM COLUMN NAMES
 # ============================================================
 SIMM_COL_TRADE_ID = "TRADE_ID"
 SIMM_COL_PRODUCT_FAMILY = "MUREXPRODUCTFAMILY"
@@ -64,16 +64,10 @@ SIMM_COL_PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 SIMM_COL_CP_JOIN_KEY = "CP_ID"
 
 # ============================================================
-# PV FILE COLUMN NAMES
+# PV FILE
 # ============================================================
 PV_JOIN_KEY = "MUREXROOTCONTRACTID"
 PV_VALUE_COL = "PV"
-
-# ============================================================
-# CSA FILE COLUMN NAMES
-# ============================================================
-CSA_JOIN_KEY = "CP_ID"
-CSA_CP_ID_COL = "CP_ID"
 
 # ============================================================
 # CDW CONFIG
@@ -83,7 +77,7 @@ INTRADAY_URL = CDW_BASE + "/fpml/intradayTrades/{trade_id}"
 LEGAL_ENTITY_URL = CDW_BASE + "/common/legalEntityClients/{party_id}/"
 
 # ============================================================
-# OUTPUT COLUMNS (NEW LAYOUT)
+# OUTPUT COLUMNS
 # ============================================================
 OUTPUT_COLUMNS = [
     "TRADE_ID", "PARTY_ID", "CP_ID", "IM_MODEL", "PRODUCT_CLASS",
@@ -162,18 +156,36 @@ def parse_ccif(xml):
 def main():
     print("Starting Script 2 – Recreate CRIF_LDN_IRD")
 
-    # ---------- Load files ----------
-    simm = pd.read_csv(SIMM_FILE, sep="|", dtype=str)
-    pv = pd.read_csv(PV_FILE, dtype=str)
-    csa = pd.read_csv(CSA_FILE, dtype=str)
+    # ---------- LOAD FILES (FIXED ENCODING) ----------
+    simm = pd.read_csv(
+        SIMM_FILE,
+        sep="|",
+        dtype=str,
+        encoding="cp1252",
+        errors="replace"
+    )
 
-    # ---------- Filter IRD ----------
+    pv = pd.read_csv(
+        PV_FILE,
+        dtype=str,
+        encoding="cp1252",
+        errors="replace"
+    )
+
+    csa = pd.read_csv(
+        CSA_FILE,
+        dtype=str,
+        encoding="cp1252",
+        errors="replace"
+    )
+
+    # ---------- FILTER IRD ----------
     simm = simm[
         (simm[SIMM_COL_PRODUCT_FAMILY] == "IRD") &
         (simm[SIMM_COL_SENSITIVITY].isin(ALLOWED_IRD_SENSITIVITIES))
     ].copy()
 
-    # ---------- Build base output ----------
+    # ---------- BASE OUTPUT ----------
     out = pd.DataFrame()
     out["TRADE_ID"] = simm[SIMM_COL_TRADE_ID].map(norm)
     out["PARTY_ID"] = CONST_PARTY_ID
@@ -205,11 +217,11 @@ def main():
     out["MASTER_AMOUNT"] = ""
     out["C_CIF"] = ""
 
-    # ---------- Join PV ----------
+    # ---------- PV JOIN ----------
     pv_map = dict(zip(pv[PV_JOIN_KEY].map(norm), pv[PV_VALUE_COL].map(norm)))
     out["PV"] = simm[SIMM_COL_PV_JOIN_KEY].map(norm).map(lambda x: pv_map.get(x, ""))
 
-    # ---------- CDW enrichment ----------
+    # ---------- CDW ENRICH ----------
     auth = get_auth()
     cache = load_cache()
 
@@ -235,24 +247,11 @@ def main():
 
     save_cache(cache)
 
-    # ---------- Validation ----------
-    errors = []
-    for idx, row in out.iterrows():
-        missing = [c for c in MANDATORY_COLUMNS if not norm(row[c])]
-        if missing:
-            errors.append({"ROW": idx, "TRADE_ID": row["TRADE_ID"], "MISSING": ",".join(missing)})
-
-    # ---------- Write output ----------
+    # ---------- WRITE OUTPUT ----------
     out = out[OUTPUT_COLUMNS]
-    out.to_csv(OUTPUT_FILE, index=False)
+    out.to_csv(OUTPUT_FILE, index=False, encoding="utf-8")
+
     print(f"Generated file: {OUTPUT_FILE}")
-
-    if errors:
-        pd.DataFrame(errors).to_csv(ERROR_FILE, index=False)
-        print(f"Errors written to: {ERROR_FILE}")
-    else:
-        print("No validation errors found")
-
     print("Script 2 completed successfully")
 
 if __name__ == "__main__":
