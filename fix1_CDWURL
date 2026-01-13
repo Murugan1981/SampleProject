@@ -1,36 +1,42 @@
 def handle_cdw(row):
-    """Handles CDW mapping type with explicit URL resolution"""
+    """Handles CDW mapping using MUREXROOTCONTRACTID"""
     values = []
-    # Stores CDW response per trade
+    # Holds CDW response per row
 
-    for trade_id in simm_df["TRADE_ID"]:
-        # Iterate through each trade
+    for trade_id in simm_df["MUREXROOTCONTRACTID"]:
+        # CHANGE 1: use MUREXROOTCONTRACTID instead of TRADE_ID
 
         raw_path_template = row["CDWURL"]
         # Example: "/{tradingEntity}/fpml/IntradayTrades/{trade_id}"
+
+        # SAFETY CHECK: fail fast if env is wrongly present
+        if "{env}" in raw_path_template:
+            raise Exception(
+                "Invalid CDWURL: {env} must NOT be present in mapping file"
+            )
 
         resolved_path = raw_path_template.format(
             tradingEntity=TRADING_ENTITY,
             trade_id=trade_id
         )
-        # Replace placeholders explicitly
+        # CHANGE 2: explicitly replace only allowed placeholders
 
         final_url = CDW_BASE_URL.rstrip("/") + resolved_path
-        # Concatenate base URL and path safely
+        # Build final URL cleanly
 
+        # DEBUG PRINTS (keep until stable)
         print("DEBUG URL BUILD")
         print("CDW_BASE_URL      :", CDW_BASE_URL)
         print("RAW PATH TEMPLATE :", raw_path_template)
         print("RESOLVED PATH     :", resolved_path)
         print("FINAL URL         :", final_url)
         print("-" * 80)
-        # Debug prints for troubleshooting
 
         response = call_cdw(final_url)
-        # Invoke CDW call only after clarity
+        # Invoke CDW only after URL is verified
 
         values.append(response)
-        # Append response
+        # Store response
 
     return values
-    # Return collected CDW responses
+    # Return list aligned to SIMM rows
