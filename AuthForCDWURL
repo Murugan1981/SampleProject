@@ -1,17 +1,53 @@
-from requests_ntlm import HttpNtlmAuth
+import subprocess
 import os
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-
 USERNAME = os.getenv("USERNAME")
 PASSWORD = os.getenv("PASSWORD")
 
-auth = HttpNtlmAuth(USERNAME, PASSWORD)
+def fetch_cdw_response(cdw_url: str):
+    """
+    Calls the given CDW URL using subprocess + curl + NTLM auth.
+    Returns response text or None on failure.
+    """
+    try:
+        # -------------------------------
+        # Construct the curl command
+        # -------------------------------
+        command = [
+            'curl',
+            '-u', f'{USERNAME}:{PASSWORD}',        # NTLM user:pass
+            '--ntlm',                               # Explicitly use NTLM
+            '-H', 'Accept: application/xml',        # Accept header
+            '-H', 'Content-Type: application/xml',  # Content-Type header
+            cdw_url                                 # Final URL
+        ]
 
-url = "https://svc-sit6-cdw.uk.mizuho-sc.com/mhbk/fpml/IntradayTrades/55252222"
-response = requests.get(url, auth=auth, verify=False)
+        print(f"[DEBUG] Executing curl: {' '.join(command)}")
 
-print(response.status_code)
-print(response.text)
+        # -------------------------------
+        # Run the subprocess
+        # -------------------------------
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60
+        )
+
+        # -------------------------------
+        # Handle the result
+        # -------------------------------
+        if result.returncode == 0:
+            print("[DEBUG] curl output fetched successfully")
+            return result.stdout
+        else:
+            print(f"[ERROR] curl failed with return code {result.returncode}")
+            print(f"[ERROR] stderr: {result.stderr.strip()}")
+            return None
+
+    except Exception as e:
+        print(f"[EXCEPTION] Exception occurred: {e}")
+        return None
