@@ -1,42 +1,55 @@
 def handle_cdw(row):
-    """Handles CDW mapping using MUREXROOTCONTRACTID"""
+    """
+    Handles CDW mapping where CDWURL contains:
+    {env}/{tradingEntity}/fpml/IntradayTrades/{Trade_id}
+    """
     values = []
-    # Holds CDW response per row
+    # Stores one CDW response per SIMM row
 
     for trade_id in simm_df["MUREXROOTCONTRACTID"]:
-        # CHANGE 1: use MUREXROOTCONTRACTID instead of TRADE_ID
+        # Use MUREXROOTCONTRACTID as requested
 
-        raw_path_template = row["CDWURL"]
-        # Example: "/{tradingEntity}/fpml/IntradayTrades/{trade_id}"
+        raw_template = row["CDWURL"]
+        # Example: "{env}/{tradingEntity}/fpml/IntradayTrades/{Trade_id}"
 
-        # SAFETY CHECK: fail fast if env is wrongly present
-        if "{env}" in raw_path_template:
-            raise Exception(
-                "Invalid CDWURL: {env} must NOT be present in mapping file"
-            )
-
-        resolved_path = raw_path_template.format(
-            tradingEntity=TRADING_ENTITY,
-            trade_id=trade_id
+        # -------------------------------
+        # STEP 1: Resolve {env} manually
+        # -------------------------------
+        resolved_env_url = raw_template.replace(
+            "{env}",
+            CDW_BASE_URL.rstrip("/")
         )
-        # CHANGE 2: explicitly replace only allowed placeholders
+        # Replaces {env} with actual base URL from JSON
 
-        final_url = CDW_BASE_URL.rstrip("/") + resolved_path
-        # Build final URL cleanly
+        # -----------------------------------------
+        # STEP 2: Resolve remaining placeholders
+        # -----------------------------------------
+        resolved_path = resolved_env_url.format(
+            tradingEntity=TRADING_ENTITY,
+            Trade_id=trade_id
+        )
+        # Replaces {tradingEntity} and {Trade_id}
 
-        # DEBUG PRINTS (keep until stable)
-        print("DEBUG URL BUILD")
-        print("CDW_BASE_URL      :", CDW_BASE_URL)
-        print("RAW PATH TEMPLATE :", raw_path_template)
-        print("RESOLVED PATH     :", resolved_path)
-        print("FINAL URL         :", final_url)
+        final_url = resolved_path
+        # URL is already fully resolved at this point
+
+        # -------------------------------
+        # DEBUG PRINTS (KEEP FOR NOW)
+        # -------------------------------
+        print("DEBUG CDW URL RESOLUTION")
+        print("RAW TEMPLATE   :", raw_template)
+        print("AFTER ENV FIX  :", resolved_env_url)
+        print("FINAL URL      :", final_url)
         print("-" * 80)
 
+        # -------------------------------
+        # STEP 3: Call CDW using NTLM
+        # -------------------------------
         response = call_cdw(final_url)
-        # Invoke CDW only after URL is verified
+        # NTLM-authenticated CDW call
 
         values.append(response)
         # Store response
 
     return values
-    # Return list aligned to SIMM rows
+    # Return responses aligned with SIMM rows
