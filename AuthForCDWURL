@@ -1,0 +1,17 @@
+from requests_ntlm import HttpNtlmAuth
+import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+USERNAME = os.getenv("USERNAME")
+PASSWORD = os.getenv("PASSWORD")
+
+auth = HttpNtlmAuth(USERNAME, PASSWORD)
+
+url = "https://svc-sit6-cdw.uk.mizuho-sc.com/mhbk/fpml/IntradayTrades/55252222"
+response = requests.get(url, auth=auth, verify=False)
+
+print(response.status_code)
+print(response.text)
